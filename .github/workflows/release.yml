@@ -60,7 +60,7 @@ jobs:
 
             | Platform | File |
             |----------|------|
-            | Windows | `.exe` or `.msi` |
+            | Windows | `.msi` installer |
             | macOS (Apple Silicon) | `_aarch64.dmg` |
             | macOS (Intel) | `_x64.dmg` |
 
@@ -75,3 +75,4 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+          tauriScript: npm run tauri
