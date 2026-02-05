@@ -31,12 +31,15 @@
     },
     "bundle": {
       "active": true,
-      "targets": ["dmg", "app", "msi"],
+      "targets": "all",
       "identifier": "com.openclawswitch.app",
       "windows": {
         "certificateThumbprint": null,
         "digestAlgorithm": "sha256",
-        "timestampUrl": ""
+        "timestampUrl": "",
+        "wix": {
+          "language": "zh-CN"
+        }
       }
     },
     "security": {
