@@ -7,6 +7,12 @@ interface Props {
   placeholder?: string
   modelValue?: string
   class?: HTMLAttributes['class']
+  autocomplete?: string
+  autocorrect?: string
+  autocapitalize?: string
+  spellcheck?: string | boolean
+  lang?: string
+  inputmode?: string
 }
 
 const props = defineProps<Props>()
@@ -30,6 +36,12 @@ const handleInput = (event: Event) => {
     :placeholder="placeholder"
     :value="modelValue"
     :class="classes"
+    :autocomplete="autocomplete"
+    :autocorrect="autocorrect"
+    :autocapitalize="autocapitalize"
+    :spellcheck="spellcheck"
+    :lang="lang"
+    :inputmode="inputmode"
     @input="handleInput"
   />
 </template>

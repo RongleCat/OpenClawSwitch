@@ -34,6 +34,9 @@ lerna-debug.log*
 Thumbs.db
 nul
 
+# Backup files
+*.backup
+
 # Local workflow / dev tools
 .zcf/
 .spec-workflow/

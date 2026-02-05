@@ -100,3 +100,10 @@ export type FileMode = 'local' | 'remote'
 
 /** 保存模式 */
 export type SaveMode = 'overwrite' | 'saveAs'
+
+/** 提供商预设配置 */
+export interface ProviderPreset {
+  name: string
+  displayName: string
+  baseUrl: string
+}

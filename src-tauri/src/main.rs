@@ -8,71 +8,18 @@ use std::path::PathBuf;
 use std::process::Command;
 
 // ============================================================================
-// 数据结构定义
+// 类型定义说明
 // ============================================================================
-
-// 以下结构体作为类型文档保留，实际操作使用 serde_json::Value
-#[allow(dead_code)]
-/// 模型成本配置
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-struct CostConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    input: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    output: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cache_read: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cache_write: Option<f64>,
-}
-
-#[allow(dead_code)]
-/// 单个模型配置
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct ModelConfig {
-    id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    input: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cost: Option<CostConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    context_window: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    headers: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    compat: Option<Value>,
-}
-
-#[allow(dead_code)]
-/// 提供商配置
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct ProviderConfig {
-    base_url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    api_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    api: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    models: Option<Vec<ModelConfig>>,
-}
-
-#[allow(dead_code)]
-/// 模型选择配置
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct ModelSelection {
-    primary: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    fallbacks: Option<Vec<String>>,
-}
+//
+// 本项目使用 serde_json::Value 进行动态 JSON 操作以获得最大灵活性。
+// 完整的 TypeScript 类型定义请参考 src/types/config.ts
+//
+// 主要类型：
+// - OpenClawConfig: 完整的配置结构
+// - ProviderConfig: 提供商配置
+// - ModelConfig: 模型配置
+// - ModelSelection: 模型选择配置
+// ============================================================================
 
 /// 返回给前端的提供商信息
 #[derive(Debug, Serialize, Clone)]
@@ -111,6 +58,18 @@ struct ConfigFileInfo {
     mode: String, // "local" | "remote"
     file_name: String,
     dir_path: String,
+}
+
+/// OpenAI 格式 /models 响应中的模型项
+#[derive(Debug, Serialize, Deserialize)]
+struct ModelItem {
+    id: String,
+}
+
+/// OpenAI 格式 /models 响应
+#[derive(Debug, Serialize, Deserialize)]
+struct ModelsListResponse {
+    data: Vec<ModelItem>,
 }
 
 // ============================================================================
@@ -201,6 +160,12 @@ fn load_default_config() -> Result<(Value, ConfigFileInfo), String> {
     };
 
     Ok((config, info))
+}
+
+/// 加载本地配置文件（~/.openclaw）
+#[tauri::command]
+fn load_local_config() -> Result<(Value, ConfigFileInfo), String> {
+    load_default_config()
 }
 
 /// 从指定目录加载配置（本地模式）
@@ -445,6 +410,11 @@ fn upsert_provider(
         }
     }
 
+    // 如果没有设置 api 类型，默认设置为 openai-completions
+    if provider.get("api").is_none() {
+        provider["api"] = json!("openai-completions");
+    }
+
     config["models"]["providers"][&name] = provider;
     Ok(config)
 }
@@ -452,12 +422,57 @@ fn upsert_provider(
 /// 删除提供商
 #[tauri::command]
 fn delete_provider(mut config: Value, name: String) -> Result<Value, String> {
+    // 检查提供商是否存在
+    let provider_exists = config
+        .get("models")
+        .and_then(|m| m.get("providers"))
+        .and_then(|p| p.as_object())
+        .map(|obj| obj.contains_key(&name))
+        .unwrap_or(false);
+
+    if !provider_exists {
+        return Err(format!("提供商 '{}' 不存在", name));
+    }
+
+    // 在删除前，先收集所有剩余提供商的信息（用于查找新模型）
+    let all_providers: Vec<(String, String)> = config
+        .get("models")
+        .and_then(|m| m.get("providers"))
+        .and_then(|p| p.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter(|(k, _)| *k != &name) // 排除要删除的提供商
+                .filter_map(|(k, v)| {
+                    v.get("models")
+                        .and_then(|models| models.as_array())
+                        .and_then(|models_list| {
+                            if !models_list.is_empty() {
+                                models_list.first()
+                                    .and_then(|first_model| first_model.get("id"))
+                                    .and_then(|id| id.as_str())
+                                    .map(|id_str| (k.clone(), id_str.to_string()))
+                            } else {
+                                None
+                            }
+                        })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // 按名称排序
+    let mut sorted_providers = all_providers.clone();
+    sorted_providers.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // 找到第一个可用模型
+    let first_available_model = sorted_providers.first().map(|(provider_name, model_id)| {
+        format!("{}/{}", provider_name, model_id)
+    });
+
+    // 现在删除提供商
     if let Some(models) = config.get_mut("models") {
         if let Some(providers) = models.get_mut("providers") {
             if let Some(obj) = providers.as_object_mut() {
-                if !obj.contains_key(&name) {
-                    return Err(format!("提供商 '{}' 不存在", name));
-                }
                 obj.remove(&name);
             }
         }
@@ -469,7 +484,23 @@ fn delete_provider(mut config: Value, name: String) -> Result<Value, String> {
     if let Some(agents) = config.get_mut("agents") {
         if let Some(defaults) = agents.get_mut("defaults") {
             if let Some(model) = defaults.get_mut("model") {
-                // 检查 primary
+                // 清除 fallbacks 中该提供商的所有模型
+                if let Some(fallbacks) = model.get_mut("fallbacks") {
+                    if let Some(arr) = fallbacks.as_array_mut() {
+                        arr.retain(|v| {
+                            v.as_str()
+                                .map(|s| !s.starts_with(&provider_prefix))
+                                .unwrap_or(true)
+                        });
+                        if arr.is_empty() {
+                            if let Some(obj) = model.as_object_mut() {
+                                obj.remove("fallbacks");
+                            }
+                        }
+                    }
+                }
+
+                // 检查 primary 是否需要切换
                 let should_clear_primary = model
                     .get("primary")
                     .and_then(|p| p.as_str())
@@ -477,15 +508,15 @@ fn delete_provider(mut config: Value, name: String) -> Result<Value, String> {
                     .unwrap_or(false);
 
                 if should_clear_primary {
-                    // 尝试使用第一个 fallback 作为新 primary
-                    let new_primary = model
+                    // 尝试从剩余的 fallback 中找第一个
+                    let new_primary_from_fallback = model
                         .get("fallbacks")
                         .and_then(|f| f.as_array())
                         .and_then(|arr| arr.first())
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
 
-                    if let Some(new_p) = new_primary {
+                    if let Some(new_p) = new_primary_from_fallback {
                         model["primary"] = json!(new_p);
                         // 移除已使用的 fallback
                         if let Some(fallbacks) = model.get_mut("fallbacks") {
@@ -499,24 +530,13 @@ fn delete_provider(mut config: Value, name: String) -> Result<Value, String> {
                             }
                         }
                     } else {
-                        // 没有 fallback，清除 primary
-                        if let Some(obj) = model.as_object_mut() {
-                            obj.remove("primary");
-                        }
-                    }
-                }
-
-                // 清除使用该提供商的 fallbacks
-                if let Some(fallbacks) = model.get_mut("fallbacks") {
-                    if let Some(arr) = fallbacks.as_array_mut() {
-                        arr.retain(|v| {
-                            v.as_str()
-                                .map(|s| !s.starts_with(&provider_prefix))
-                                .unwrap_or(true)
-                        });
-                        if arr.is_empty() {
+                        // 没有可用的 fallback，使用第一个可用模型
+                        if let Some(new_model) = first_available_model {
+                            model["primary"] = json!(new_model);
+                        } else {
+                            // 没有找到任何可用模型，清除 primary
                             if let Some(obj) = model.as_object_mut() {
-                                obj.remove("fallbacks");
+                                obj.remove("primary");
                             }
                         }
                     }
@@ -611,6 +631,37 @@ fn remove_model_from_provider(
     Ok(config)
 }
 
+/// 从提供商 API 获取模型列表
+#[tauri::command]
+async fn fetch_provider_models(
+    base_url: String,
+    api_key: String,
+) -> Result<Vec<String>, String> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("创建客户端失败: {}", e))?;
+
+    let response = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("API 返回错误: {}", response.status()));
+    }
+
+    let result: ModelsListResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("解析响应失败: {}", e))?;
+
+    Ok(result.data.into_iter().map(|m| m.id).collect())
+}
+
 // ============================================================================
 // OpenClaw 工具命令
 // ============================================================================
@@ -652,10 +703,30 @@ fn open_tui() -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
+        // macOS: 使用 osascript 打开 Terminal 并执行命令
+        // 需要先加载 shell 配置以确保 openclaw 命令可用
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let shell_name = shell
+            .rsplit('/')
+            .next()
+            .unwrap_or("zsh")
+            .to_string();
+
+        // 根据不同 shell 加载相应的配置文件
+        let config_file = match shell_name.as_str() {
+            "zsh" => "$HOME/.zshrc",
+            "bash" => "$HOME/.bash_profile",
+            _ => "$HOME/.zshrc",
+        };
+
+        // 使用 printf 避免 shell 转义问题
         Command::new("osascript")
             .args([
                 "-e",
-                "tell application \"Terminal\" to do script \"openclaw tui\"",
+                &format!(
+                    "tell application \"Terminal\" to do script \"source {} && openclaw tui\"",
+                    config_file
+                ),
                 "-e",
                 "tell application \"Terminal\" to activate",
             ])
@@ -703,6 +774,7 @@ fn main() {
             // 文件操作
             get_default_config_path,
             load_default_config,
+            load_local_config,
             load_config_from_directory,
             load_config_from_file,
             save_config,
@@ -716,6 +788,7 @@ fn main() {
             delete_provider,
             add_model_to_provider,
             remove_model_from_provider,
+            fetch_provider_models,
             // OpenClaw 工具
             restart_gateway,
             open_tui,

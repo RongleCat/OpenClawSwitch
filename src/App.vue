@@ -6,17 +6,14 @@ import Button from './components/ui/Button.vue'
 import Input from './components/ui/Input.vue'
 import Label from './components/ui/Label.vue'
 import Card from './components/ui/Card.vue'
-import Alert from './components/ui/Alert.vue'
 import Toast from './components/ui/Toast.vue'
-import FileSelector from './components/FileSelector.vue'
 import ProviderCard from './components/ProviderCard.vue'
 import {
-  Server, Key, Globe, Settings, CheckCircle2, XCircle,
-  Eye, ListTree, Save, Download, Plus, X, ChevronDown, FolderOpen, FileCode,
-  RefreshCw, Terminal, Wrench
+  Server, Settings, ListTree, Save, Download, Plus, X, ChevronDown, FolderOpen, FileCode,
+  RefreshCw, Terminal, Wrench, Hammer
 } from 'lucide-vue-next'
 import type {
-  OpenClawConfig, ProviderInfo, ModelSelectionInfo, ConfigFileInfo
+  OpenClawConfig, ProviderInfo, ModelSelectionInfo, ConfigFileInfo, ProviderPreset
 } from './types/config'
 
 // ============================================================================
@@ -27,6 +24,7 @@ import type {
 const currentConfig = ref<OpenClawConfig | null>(null)
 const fileInfo = ref<ConfigFileInfo | null>(null)
 const isDirty = ref(false)
+const lastSaveTime = ref<string | null>(null)
 
 // 提供商和模型状态
 const providers = ref<ProviderInfo[]>([])
@@ -34,9 +32,6 @@ const modelSelection = ref<ModelSelectionInfo>({ primary: null, fallbacks: [] })
 
 // UI 状态
 const loading = ref(false)
-const message = ref('')
-const messageType = ref<'success' | 'error' | ''>('')
-const showConfig = ref(false)
 
 // 弹窗状态
 const showProviderModal = ref(false)
@@ -57,12 +52,31 @@ const newProvider = ref({
 // 新模型表单
 const newModelId = ref('')
 
+// 模型列表相关状态
+const availableModels = ref<string[]>([])
+const loadingModels = ref(false)
+const showModelDropdown = ref(false)
+
 // ============================================================================
 // 计算属性
 // ============================================================================
 
 const isLocalMode = computed(() => fileInfo.value?.mode === 'local')
 const canSave = computed(() => currentConfig.value && fileInfo.value)
+
+// 过滤后的模型列表（支持模糊搜索）
+const filteredModels = computed(() => {
+  if (!newModelId.value) return availableModels.value
+  const search = newModelId.value.toLowerCase()
+  return availableModels.value.filter(model =>
+    model.toLowerCase().includes(search)
+  )
+})
+
+// 判断是否存在 Minimax 服务商
+const hasMinimaxProvider = computed(() => {
+  return currentConfig.value?.models?.providers?.['minimax'] !== undefined
+})
 
 // ============================================================================
 // 文件操作
@@ -71,48 +85,35 @@ const canSave = computed(() => currentConfig.value && fileInfo.value)
 // 加载默认配置
 const loadDefaultConfig = async () => {
   loading.value = true
-  message.value = ''
   try {
     const [config, info] = await invoke<[OpenClawConfig, ConfigFileInfo]>('load_default_config')
     currentConfig.value = config
     fileInfo.value = info
     isDirty.value = false
     await refreshProviders()
-    message.value = `已加载: ${info.fileName}`
-    messageType.value = 'success'
+    showToast('success', `已加载: ${info.fileName}`)
   } catch (error) {
     console.error('加载默认配置失败:', error)
-    message.value = `${error}`
-    messageType.value = 'error'
+    showToast('error', `${error}`)
   } finally {
     loading.value = false
   }
 }
 
-// 选择配置目录
-const selectDirectory = async () => {
+// 加载本地配置文件
+const loadLocalConfig = async () => {
+  loading.value = true
   try {
-    const selected = await open({
-      directory: true,
-      title: '选择 OpenClaw 配置目录'
-    })
-    if (selected && typeof selected === 'string') {
-      loading.value = true
-      const [config, info] = await invoke<[OpenClawConfig, ConfigFileInfo]>(
-        'load_config_from_directory',
-        { dirPath: selected }
-      )
-      currentConfig.value = config
-      fileInfo.value = info
-      isDirty.value = false
-      await refreshProviders()
-      message.value = `已加载: ${info.fileName}`
-      messageType.value = 'success'
-    }
+    const [config, info] = await invoke<[OpenClawConfig, ConfigFileInfo]>('load_local_config')
+    currentConfig.value = config
+    fileInfo.value = info
+    isDirty.value = false
+    lastSaveTime.value = null
+    await refreshProviders()
+    showToast('success', `已加载本地配置: ${info.fileName}`)
   } catch (error) {
-    console.error('选择目录失败:', error)
-    message.value = `${error}`
-    messageType.value = 'error'
+    console.error('加载本地配置失败:', error)
+    showToast('error', `${error}`)
   } finally {
     loading.value = false
   }
@@ -135,45 +136,11 @@ const selectFile = async () => {
       fileInfo.value = info
       isDirty.value = false
       await refreshProviders()
-      message.value = `已加载: ${info.fileName}`
-      messageType.value = 'success'
+      showToast('success', `已加载: ${info.fileName}`)
     }
   } catch (error) {
     console.error('选择文件失败:', error)
-    message.value = `${error}`
-    messageType.value = 'error'
-  } finally {
-    loading.value = false
-  }
-}
-
-// 重新加载
-const reload = async () => {
-  if (!fileInfo.value) return
-  loading.value = true
-  try {
-    if (fileInfo.value.mode === 'local') {
-      const [config, info] = await invoke<[OpenClawConfig, ConfigFileInfo]>(
-        'load_config_from_directory',
-        { dirPath: fileInfo.value.dirPath }
-      )
-      currentConfig.value = config
-      fileInfo.value = info
-    } else {
-      const [config, info] = await invoke<[OpenClawConfig, ConfigFileInfo]>(
-        'load_config_from_file',
-        { filePath: fileInfo.value.path }
-      )
-      currentConfig.value = config
-      fileInfo.value = info
-    }
-    isDirty.value = false
-    await refreshProviders()
-    message.value = '已重新加载'
-    messageType.value = 'success'
-  } catch (error) {
-    message.value = `重新加载失败: ${error}`
-    messageType.value = 'error'
+    showToast('error', `${error}`)
   } finally {
     loading.value = false
   }
@@ -189,11 +156,10 @@ const saveConfig = async () => {
       path: fileInfo.value.path
     })
     isDirty.value = false
-    message.value = '已保存'
-    messageType.value = 'success'
+    lastSaveTime.value = new Date().toLocaleString('zh-CN', { hour12: false })
+    showToast('success', '已保存')
   } catch (error) {
-    message.value = `保存失败: ${error}`
-    messageType.value = 'error'
+    showToast('error', `保存失败: ${error}`)
   } finally {
     loading.value = false
   }
@@ -218,15 +184,13 @@ const saveConfigAs = async () => {
         path: selected,
         mode: 'remote',
         fileName: selected.split(/[/\\]/).pop() || 'openclaw.json',
-        dirPath: selected.substring(0, selected.lastIndexOf(/[/\\]/))
+        dirPath: selected.substring(0, Math.max(selected.lastIndexOf('/'), selected.lastIndexOf('\\')))
       }
       isDirty.value = false
-      message.value = `已保存到: ${selected}`
-      messageType.value = 'success'
+      showToast('success', `已保存到: ${selected}`)
     }
   } catch (error) {
-    message.value = `另存为失败: ${error}`
-    messageType.value = 'error'
+    showToast('error', `另存为失败: ${error}`)
   } finally {
     loading.value = false
   }
@@ -258,14 +222,9 @@ const refreshProviders = async () => {
   }
 }
 
-// 检查提供商是否为主要模型
-const isPrimaryProvider = (providerName: string) => {
+// 检查服务商是否包含主模型
+const providerContainsPrimary = (providerName: string) => {
   return modelSelection.value.primary?.startsWith(`${providerName}/`) || false
-}
-
-// 检查提供商是否为备用模型
-const isFallbackProvider = (providerName: string) => {
-  return modelSelection.value.fallbacks.some(f => f.startsWith(`${providerName}/`))
 }
 
 // 设置主要模型
@@ -279,11 +238,9 @@ const setPrimaryModel = async (modelPath: string) => {
     isDirty.value = true
     await refreshProviders()
     await autoSave()
-    message.value = `主要模型: ${modelPath}`
-    messageType.value = 'success'
+    showToast('success', `主要模型: ${modelPath}`)
   } catch (error) {
-    message.value = `设置失败: ${error}`
-    messageType.value = 'error'
+    showToast('error', `设置失败: ${error}`)
   }
 }
 
@@ -307,11 +264,9 @@ const setFallbackModel = async (modelPath: string) => {
     isDirty.value = true
     await refreshProviders()
     await autoSave()
-    message.value = '备用模型已更新'
-    messageType.value = 'success'
+    showToast('success', '备用模型已更新')
   } catch (error) {
-    message.value = `设置失败: ${error}`
-    messageType.value = 'error'
+    showToast('error', `设置失败: ${error}`)
   }
 }
 
@@ -325,8 +280,7 @@ const openProviderModal = () => {
 const addProvider = async () => {
   if (!currentConfig.value) return
   if (!newProvider.value.name.trim() || !newProvider.value.baseUrl.trim()) {
-    message.value = '请填写服务商名称和 Base URL'
-    messageType.value = 'error'
+    showToast('error', '请填写服务商名称和 Base URL')
     return
   }
 
@@ -346,11 +300,9 @@ const addProvider = async () => {
 
     showProviderModal.value = false
     newProvider.value = { name: '', baseUrl: '', apiKey: '' }
-    message.value = `已添加: ${providerNameToAdd}`
-    messageType.value = 'success'
+    showToast('success', `已添加: ${providerNameToAdd}`)
   } catch (error) {
-    message.value = `添加失败: ${error}`
-    messageType.value = 'error'
+    showToast('error', `添加失败: ${error}`)
   } finally {
     loading.value = false
   }
@@ -369,11 +321,9 @@ const deleteProvider = async (providerName: string) => {
     isDirty.value = true
     await refreshProviders()
     await autoSave()
-    message.value = `已删除: ${providerName}`
-    messageType.value = 'success'
+    showToast('success', `已删除: ${providerName}`)
   } catch (error) {
-    message.value = `删除失败: ${error}`
-    messageType.value = 'error'
+    showToast('error', `删除失败: ${error}`)
   }
 }
 
@@ -381,6 +331,8 @@ const deleteProvider = async (providerName: string) => {
 const openModelModal = (providerName: string) => {
   modelModalProvider.value = providerName
   newModelId.value = ''
+  availableModels.value = []
+  showModelDropdown.value = false
   showModelModal.value = true
 }
 
@@ -397,24 +349,61 @@ const addModelToProvider = async (providerName: string, modelId: string) => {
     isDirty.value = true
     await refreshProviders()
     await autoSave()
-    message.value = `已添加: ${providerName}/${modelId}`
-    messageType.value = 'success'
+    showToast('success', `已添加: ${providerName}/${modelId}`)
   } catch (error) {
-    message.value = `添加失败: ${error}`
-    messageType.value = 'error'
+    showToast('error', `添加失败: ${error}`)
   }
 }
 
 // 从弹窗添加模型
 const addModelFromModal = async () => {
   if (!newModelId.value.trim()) {
-    message.value = '请输入模型 ID'
-    messageType.value = 'error'
+    showToast('error', '请输入模型 ID')
     return
   }
   await addModelToProvider(modelModalProvider.value, newModelId.value.trim())
   showModelModal.value = false
   newModelId.value = ''
+}
+
+// 从下拉列表选择模型
+const selectModelFromDropdown = (model: string) => {
+  newModelId.value = model
+  showModelDropdown.value = false
+}
+
+// 获取提供商的模型列表
+const fetchModelsForProvider = async (providerName: string) => {
+  const provider = providers.value.find(p => p.name === providerName)
+  if (!provider) return
+
+  // 检查是否配置了 API Key
+  const providerConfig = currentConfig.value?.models?.providers?.[providerName]
+  if (!providerConfig?.apiKey) {
+    showToast('error', '该服务商未配置 API Key，无法获取模型列表')
+    return
+  }
+
+  loadingModels.value = true
+  try {
+    const models = await invoke<string[]>('fetch_provider_models', {
+      baseUrl: provider.baseUrl,
+      apiKey: providerConfig.apiKey
+    })
+    availableModels.value = models
+  } catch (error) {
+    showToast('error', `获取模型失败: ${error}`)
+  } finally {
+    loadingModels.value = false
+  }
+}
+
+// 下拉框打开时触发加载
+const handleDropdownOpen = async () => {
+  showModelDropdown.value = true
+  if (availableModels.value.length === 0 && !loadingModels.value) {
+    await fetchModelsForProvider(modelModalProvider.value)
+  }
 }
 
 // 从提供商删除模型
@@ -429,11 +418,9 @@ const removeModelFromProvider = async (providerName: string, modelId: string) =>
     isDirty.value = true
     await refreshProviders()
     await autoSave()
-    message.value = `已删除: ${providerName}/${modelId}`
-    messageType.value = 'success'
+    showToast('success', `已删除: ${providerName}/${modelId}`)
   } catch (error) {
-    message.value = `删除失败: ${error}`
-    messageType.value = 'error'
+    showToast('error', `删除失败: ${error}`)
   }
 }
 
@@ -449,11 +436,9 @@ const removeFallbackModel = async (modelPath: string) => {
     isDirty.value = true
     await refreshProviders()
     await autoSave()
-    message.value = `已移除: ${modelPath}`
-    messageType.value = 'success'
+    showToast('success', `已移除: ${modelPath}`)
   } catch (error) {
-    message.value = `移除失败: ${error}`
-    messageType.value = 'error'
+    showToast('error', `移除失败: ${error}`)
   }
 }
 
@@ -512,11 +497,9 @@ const selectPrimaryModel = async (modelPath: string) => {
     isDirty.value = true
     await refreshProviders()
     await autoSave()
-    message.value = `主要模型: ${modelPath}`
-    messageType.value = 'success'
+    showToast('success', `主要模型: ${modelPath}`)
   } catch (error) {
-    message.value = `设置失败: ${error}`
-    messageType.value = 'error'
+    showToast('error', `设置失败: ${error}`)
   }
 }
 
@@ -524,7 +507,7 @@ const selectPrimaryModel = async (modelPath: string) => {
 const showFallbackSelector = ref(false)
 
 // 工具按钮状态
-const toolLoading = ref<'restart' | 'tui' | null>(null)
+const toolLoading = ref<'restart' | 'tui' | 'minimax' | null>(null)
 
 // Toast 通知状态
 const toast = ref<{ type: 'success' | 'error'; message: string } | null>(null)
@@ -555,6 +538,9 @@ const handleClickOutside = (event: MouseEvent) => {
   }
   if (!target.closest('.primary-selector-container')) {
     showPrimarySelector.value = false
+  }
+  if (!target.closest('.model-dropdown-container')) {
+    showModelDropdown.value = false
   }
 }
 
@@ -588,22 +574,33 @@ const openTui = async () => {
   }
 }
 
-// 快速示例
-const examples = [
-  { name: 'OpenAI', provider: 'openai', url: 'https://api.openai.com/v1' },
-  { name: 'Anthropic', provider: 'anthropic', url: 'https://api.anthropic.com/v1' },
-  { name: 'Ollama', provider: 'ollama', url: 'http://localhost:11434/v1' },
-]
+// Minimax 国服修复
+const fixMinimaxDomestic = async () => {
+  if (!currentConfig.value?.models?.providers?.['minimax']) return
 
-const fillExample = (example: typeof examples[0]) => {
-  newProvider.value.name = example.provider
-  newProvider.value.baseUrl = example.url
+  toolLoading.value = 'minimax'
+  try {
+    currentConfig.value.models.providers.minimax.baseUrl = 'https://api.minimaxi.com/anthropic'
+    isDirty.value = true
+    await autoSave()
+    showToast('success', 'Minimax 国服已修复')
+  } catch (error) {
+    showToast('error', `修复失败: ${error}`)
+  } finally {
+    toolLoading.value = null
+  }
 }
 
-// 清除消息
-const clearMessage = () => {
-  message.value = ''
-  messageType.value = ''
+// 中国常见提供商预设
+const chineseProviderPresets: ProviderPreset[] = [
+  { name: 'deepseek', displayName: 'DeepSeek', baseUrl: 'https://api.deepseek.com' },
+  { name: 'nvidia', displayName: '英伟达', baseUrl: 'https://integrate.api.nvidia.com/v1' },
+  { name: 'siliconflow', displayName: '硅基流动', baseUrl: 'https://api.siliconflow.cn/v1' },
+]
+
+const fillPreset = (preset: ProviderPreset) => {
+  newProvider.value.name = preset.name
+  newProvider.value.baseUrl = preset.baseUrl
 }
 
 // ============================================================================
@@ -626,47 +623,24 @@ watch(currentConfig, () => {
 
 <template>
   <div class="h-screen flex flex-col bg-gray-50 dark:bg-gray-900 overflow-hidden">
-    <!-- 顶部栏：标题 + 文件选择 + 消息 -->
+    <!-- 顶部栏：标题 -->
     <header class="flex-shrink-0 border-b bg-white dark:bg-gray-800 px-4 py-2">
       <div class="flex items-center justify-between gap-4">
-        <!-- 左侧：标题和文件信息 -->
-        <div class="flex items-center gap-4 min-w-0">
-          <div class="flex items-center gap-2">
-            <Server class="w-6 h-6 text-blue-600 flex-shrink-0" />
-            <h1 class="font-bold text-lg whitespace-nowrap">OpenClaw Manager</h1>
-          </div>
-
-          <!-- 文件路径显示 -->
-          <div v-if="fileInfo" class="flex items-center gap-2 text-sm min-w-0">
-            <span class="px-1.5 py-0.5 rounded text-xs font-medium"
-                  :class="isLocalMode ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' : 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'">
-              {{ isLocalMode ? '本地' : '远程' }}
-            </span>
-            <span class="text-muted-foreground truncate max-w-xs" :title="fileInfo.path">
-              {{ fileInfo.path }}
-            </span>
-            <span v-if="isDirty && !isLocalMode" class="text-amber-500">●</span>
-          </div>
+        <!-- 左侧：标题 -->
+        <div class="flex items-center gap-2">
+          <Server class="w-6 h-6 text-blue-600 flex-shrink-0" />
+          <h1 class="font-bold text-lg whitespace-nowrap">OpenClawSwitch</h1>
         </div>
 
-        <!-- 右侧：操作按钮和消息 -->
+        <!-- 右侧：操作按钮 -->
         <div class="flex items-center gap-2 flex-shrink-0">
-          <!-- 消息提示 -->
-          <div v-if="message"
-               class="flex items-center gap-1 px-2 py-1 rounded text-xs cursor-pointer"
-               :class="messageType === 'success' ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' : 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300'"
-               @click="clearMessage">
-            <component :is="messageType === 'success' ? CheckCircle2 : XCircle" class="w-3 h-3" />
-            <span class="max-w-40 truncate">{{ message }}</span>
-          </div>
-
-          <Button variant="outline" size="sm" @click="selectDirectory" :disabled="loading">
-            <FolderOpen class="w-4 h-4" />
-            目录
-          </Button>
           <Button variant="outline" size="sm" @click="selectFile" :disabled="loading">
             <Settings class="w-4 h-4" />
-            文件
+            选择文件
+          </Button>
+          <Button variant="outline" size="sm" @click="loadLocalConfig" :disabled="loading">
+            <FolderOpen class="w-4 h-4" />
+            本地配置
           </Button>
           <Button v-if="!isLocalMode && canSave" variant="outline" size="sm" @click="saveConfig" :disabled="loading || !isDirty">
             <Save class="w-4 h-4" />
@@ -679,6 +653,22 @@ watch(currentConfig, () => {
             源文件
           </Button>
         </div>
+      </div>
+
+      <!-- 文件路径信息行 -->
+      <div v-if="fileInfo" class="flex items-center gap-2 mt-2 text-sm">
+        <span class="px-1.5 py-0.5 rounded text-xs font-medium"
+              :class="isLocalMode ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' : 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'">
+          {{ isLocalMode ? '本地' : '远程' }}
+        </span>
+        <span class="text-muted-foreground truncate" :title="fileInfo.path">
+          {{ fileInfo.path }}
+        </span>
+        <span v-if="isDirty && !isLocalMode" class="text-amber-500">●</span>
+        <!-- 保存时间标签 -->
+        <span v-if="lastSaveTime" class="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300">
+          保存于 {{ lastSaveTime }}
+        </span>
       </div>
     </header>
 
@@ -782,6 +772,16 @@ watch(currentConfig, () => {
                   <Terminal class="w-4 h-4" />
                   打开 TUI
                 </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  @click="fixMinimaxDomestic"
+                  :disabled="toolLoading !== null || !hasMinimaxProvider"
+                  class="w-full justify-start gap-2"
+                >
+                  <Hammer class="w-4 h-4" :class="{ 'animate-pulse': toolLoading === 'minimax' }" />
+                  Minimax 国服修复
+                </Button>
               </div>
             </div>
           </Card>
@@ -810,8 +810,7 @@ watch(currentConfig, () => {
                 v-for="provider in providers"
                 :key="provider.name"
                 :provider="provider"
-                :is-primary="isPrimaryProvider(provider.name)"
-                :is-fallback="isFallbackProvider(provider.name)"
+                :contains-primary="providerContainsPrimary(provider.name)"
                 @set-primary="setPrimaryModel"
                 @set-fallback="setFallbackModel"
                 @add-model="openModelModal(provider.name)"
@@ -843,12 +842,17 @@ watch(currentConfig, () => {
             <Input v-model="newProvider.apiKey" type="password" placeholder="sk-..." :disabled="loading" />
           </div>
 
-          <!-- 快速填充 -->
-          <div class="flex items-center gap-2">
-            <span class="text-xs text-muted-foreground">快速:</span>
-            <Button v-for="ex in examples" :key="ex.provider" variant="outline" size="sm" @click="fillExample(ex)" class="h-6 text-xs">
-              {{ ex.name }}
-            </Button>
+          <!-- 快速选择标签 -->
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="text-xs text-muted-foreground">快速选择:</span>
+            <button
+              v-for="preset in chineseProviderPresets"
+              :key="preset.name"
+              @click="fillPreset(preset)"
+              class="px-2 py-1 text-xs rounded-md bg-blue-50 text-blue-700 hover:bg-blue-100 dark:bg-blue-900 dark:text-blue-200 transition-colors"
+            >
+              {{ preset.displayName }}
+            </button>
           </div>
         </div>
 
@@ -870,7 +874,44 @@ watch(currentConfig, () => {
         <div class="space-y-4">
           <div>
             <Label class="text-sm mb-1 block">模型 ID *</Label>
-            <Input v-model="newModelId" placeholder="例如: gpt-4o, claude-3-opus" @keyup.enter="addModelFromModal" />
+            <div class="relative model-dropdown-container">
+              <Input
+                :value="newModelId"
+                @input="newModelId = ($event.target as HTMLInputElement).value"
+                @focus="handleDropdownOpen"
+                placeholder="搜索模型或手动输入"
+                :disabled="loadingModels"
+                @keyup.enter="addModelFromModal"
+                autocomplete="off"
+                autocorrect="off"
+                autocapitalize="off"
+                spellcheck="false"
+                lang="en"
+              />
+              <!-- 下拉列表 -->
+              <div
+                v-if="showModelDropdown && (availableModels.length > 0 || loadingModels)"
+                class="absolute inset-x-0 top-full mt-1 max-h-48 overflow-auto bg-white dark:bg-gray-800 border rounded-lg shadow-lg z-10"
+                @click.stop
+              >
+                <div v-if="loadingModels" class="px-3 py-2 text-xs text-muted-foreground">
+                  加载中...
+                </div>
+                <template v-else>
+                  <div
+                    v-for="model in filteredModels"
+                    :key="model"
+                    @click="selectModelFromDropdown(model)"
+                    class="px-3 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer text-sm border-b last:border-b-0"
+                  >
+                    {{ model }}
+                  </div>
+                  <p v-if="filteredModels.length === 0" class="px-3 py-2 text-xs text-muted-foreground">
+                    无匹配结果
+                  </p>
+                </template>
+              </div>
+            </div>
           </div>
         </div>
 

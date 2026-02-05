@@ -31,7 +31,7 @@
     },
     "bundle": {
       "active": true,
-      "targets": "all",
+      "targets": ["dmg", "app", "msi"],
       "identifier": "com.openclawswitch.app",
       "windows": {
         "certificateThumbprint": null,
