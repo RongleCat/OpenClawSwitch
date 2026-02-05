@@ -1,10 +1,30 @@
-# OpenClawSwitch
+<p align="center">
+  <img src="docs/logo.png" alt="OpenClawSwitch Logo" width="144">
+</p>
 
-English | [简体中文](README.md)
+<h1 align="center">OpenClawSwitch</h1>
 
-A modern, lightweight configuration manager for [OpenClaw](https://github.com/anthropics/claude-code), built with Tauri + Vue 3.
+<p align="center">
+  English | <a href="README.md">简体中文</a>
+</p>
 
-![OpenClawSwitch Screenshot](docs/screenshot.png)
+<p align="center">
+  A modern, lightweight configuration manager for OpenClaw
+</p>
+
+<p align="center">
+  <img src="docs/screenshot-1.png" alt="OpenClawSwitch Main Interface" width="800">
+</p>
+
+<p align="center">
+  <img src="docs/screenshot-2.png" alt="OpenClawSwitch Features" width="800">
+</p>
+
+---
+
+## Overview
+
+OpenClawSwitch is a visual configuration manager designed for **OpenClaw**, built with Tauri + Vue 3. Manage your AI model configurations effortlessly through a clean and intuitive graphical interface - no more manual JSON editing.
 
 ## Features
 
@@ -129,6 +149,6 @@ Issues and Pull Requests are welcome!
 
 ## Links
 
-- [OpenClaw (Claude Code)](https://github.com/anthropics/claude-code)
+- [OpenClaw](https://github.com/miaoxworld/openclaw-manager)
 - [Tauri](https://tauri.app/)
 - [Vue 3](https://vuejs.org/)

@@ -1,6 +1,6 @@
 @echo off
 echo ========================================
-echo OpenClaw Manager - Windows 构建脚本
+echo OpenClawSwitch - Windows 构建脚本
 echo ========================================
 echo.
 

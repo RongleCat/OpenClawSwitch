@@ -1,10 +1,30 @@
-# OpenClawSwitch
+<p align="center">
+  <img src="docs/logo.png" alt="OpenClawSwitch Logo" width="144">
+</p>
 
-[English](README_EN.md) | 简体中文
+<h1 align="center">OpenClawSwitch</h1>
 
-一个现代化、轻量级的 [OpenClaw](https://github.com/anthropics/claude-code) 配置管理工具，基于 Tauri + Vue 3 构建。
+<p align="center">
+  <a href="README_EN.md">English</a> | 简体中文
+</p>
 
-![OpenClawSwitch Screenshot](docs/screenshot.png)
+<p align="center">
+  一个现代化、轻量级的 OpenClaw 配置管理工具
+</p>
+
+<p align="center">
+  <img src="docs/screenshot-1.png" alt="OpenClawSwitch 主界面" width="800">
+</p>
+
+<p align="center">
+  <img src="docs/screenshot-2.png" alt="OpenClawSwitch 功能展示" width="800">
+</p>
+
+---
+
+## 简介
+
+OpenClawSwitch 是一款专为 **OpenClaw** 设计的可视化配置管理工具，基于 Tauri + Vue 3 构建。通过简洁直观的图形界面，让您轻松管理 AI 模型配置，无需手动编辑 JSON 文件。
 
 ## 功能特性
 
@@ -129,6 +149,6 @@ npm run tauri:build
 
 ## 相关链接
 
-- [OpenClaw (Claude Code)](https://github.com/anthropics/claude-code)
+- [OpenClaw](https://github.com/miaoxworld/openclaw-manager)
 - [Tauri](https://tauri.app/)
 - [Vue 3](https://vuejs.org/)
