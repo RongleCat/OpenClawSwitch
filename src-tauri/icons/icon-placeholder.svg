@@ -1,0 +1,34 @@
+<!-- 这是一个占位 SVG 图标,实际使用时请替换为 PNG 格式 -->
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- 背景 -->
+  <rect width="1024" height="1024" fill="#2563eb"/>
+
+  <!-- 服务器图标 -->
+  <g transform="translate(512, 512)">
+    <!-- 上层 -->
+    <rect x="-200" y="-250" width="400" height="120" rx="20" fill="#fff" opacity="0.9"/>
+    <circle cx="-120" cy="-190" r="20" fill="#2563eb"/>
+    <circle cx="-50" cy="-190" r="20" fill="#2563eb"/>
+    <rect x="30" y="-210" width="140" height="40" rx="5" fill="#2563eb"/>
+
+    <!-- 中层 -->
+    <rect x="-200" y="-100" width="400" height="120" rx="20" fill="#fff" opacity="0.9"/>
+    <circle cx="-120" cy="-40" r="20" fill="#2563eb"/>
+    <circle cx="-50" cy="-40" r="20" fill="#2563eb"/>
+    <rect x="30" y="-60" width="140" height="40" rx="5" fill="#2563eb"/>
+
+    <!-- 下层 -->
+    <rect x="-200" y="50" width="400" height="120" rx="20" fill="#fff" opacity="0.9"/>
+    <circle cx="-120" cy="110" r="20" fill="#16a34a"/>
+    <circle cx="-50" cy="110" r="20" fill="#16a34a"/>
+    <rect x="30" y="90" width="140" height="40" rx="5" fill="#16a34a"/>
+  </g>
+
+  <!-- 标题 -->
+  <text x="512" y="880" font-family="Arial, sans-serif" font-size="80" font-weight="bold" text-anchor="middle" fill="#fff">
+    OpenClaw
+  </text>
+  <text x="512" y="950" font-family="Arial, sans-serif" font-size="60" text-anchor="middle" fill="#dbeafe">
+    Manager
+  </text>
+</svg>

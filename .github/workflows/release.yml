@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin
+            name: macOS-ARM64
+          - platform: macos-latest
+            args: --target x86_64-apple-darwin
+            name: macOS-x64
+          - platform: windows-latest
+            args: ""
+            name: Windows-x64
+
+    runs-on: ${{ matrix.platform }}
+    name: Build (${{ matrix.name }})
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build Tauri App
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: "OpenClawSwitch v__VERSION__"
+          releaseBody: |
+            ## Download
+
+            | Platform | File |
+            |----------|------|
+            | Windows | `.exe` or `.msi` |
+            | macOS (Apple Silicon) | `_aarch64.dmg` |
+            | macOS (Intel) | `_x64.dmg` |
+
+            > **macOS Users**: Since the app is not signed, run this command before first launch:
+            > ```bash
+            > xattr -c /Applications/OpenClawSwitch.app
+            > ```
+
+            ## Changes
+
+            See [README](https://github.com/RongleCat/OpenClawSwitch#readme) for usage instructions.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
