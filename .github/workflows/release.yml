@@ -64,7 +64,7 @@ jobs:
             | macOS (Apple Silicon) | `_aarch64.dmg` |
             | macOS (Intel) | `_x64.dmg` |
 
-            > **macOS Users**: Since the app is not signed, run this command before first launch:
+            > **Note**: The macOS app is signed with an ad-hoc certificate. On first launch, right-click the app and select "Open", or run:
             > ```bash
             > xattr -c /Applications/OpenClawSwitch.app
             > ```
@@ -76,3 +76,5 @@ jobs:
           prerelease: false
           args: ${{ matrix.args }}
           tauriScript: npm run tauri
+          macOSSign: ''
+          appCert: ''
