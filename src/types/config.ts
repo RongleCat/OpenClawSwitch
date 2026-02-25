@@ -90,13 +90,13 @@ export interface ModelSelectionInfo {
 /** 配置文件信息 */
 export interface ConfigFileInfo {
   path: string
-  mode: 'local' | 'remote'
+  mode: 'local' | 'remote' | 'ssh'
   fileName: string
   dirPath: string
 }
 
 /** 文件操作模式 */
-export type FileMode = 'local' | 'remote'
+export type FileMode = 'local' | 'remote' | 'ssh'
 
 /** 保存模式 */
 export type SaveMode = 'overwrite' | 'saveAs'
@@ -106,4 +106,46 @@ export interface ProviderPreset {
   name: string
   displayName: string
   baseUrl: string
+}
+
+// ============================================================================
+// SSH 相关类型
+// ============================================================================
+
+/** SSH 认证方式 */
+export type SshAuthMode = 'password' | 'privateKey'
+
+/** SSH 连接配置 */
+export interface SshProfile {
+  id: string
+  name: string
+  host: string
+  port: number
+  username: string
+  authMode: SshAuthMode
+  password?: string
+  keyPath?: string
+}
+
+/** SSH 指纹信息 */
+export interface FingerprintInfo {
+  sha256: string
+  md5: string
+  host: string
+  isKnown: boolean
+}
+
+/** 远程文件条目 */
+export interface RemoteFileEntry {
+  name: string
+  path: string
+  isDir: boolean
+  size: number
+}
+
+/** 配置文件搜索结果 */
+export interface ConfigSearchResult {
+  path: string
+  fileName: string
+  dirPath: string
 }

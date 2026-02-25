@@ -7,6 +7,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+mod ssh;
+mod ssh_profiles;
+
 // ============================================================================
 // 类型定义说明
 // ============================================================================
@@ -770,6 +773,7 @@ fn open_tui() -> Result<(), String> {
 
 fn main() {
     tauri::Builder::default()
+        .manage(ssh::SshManager::new())
         .invoke_handler(tauri::generate_handler![
             // 文件操作
             get_default_config_path,
@@ -792,6 +796,20 @@ fn main() {
             // OpenClaw 工具
             restart_gateway,
             open_tui,
+            // SSH 连接
+            ssh::ssh_connect,
+            ssh::ssh_auth_password,
+            ssh::ssh_auth_key,
+            ssh::ssh_disconnect,
+            ssh::ssh_get_status,
+            ssh::ssh_list_dir,
+            ssh::ssh_read_file,
+            ssh::ssh_write_file,
+            ssh::ssh_search_config,
+            // SSH 配置管理
+            ssh_profiles::ssh_save_profile,
+            ssh_profiles::ssh_load_profiles,
+            ssh_profiles::ssh_delete_profile,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

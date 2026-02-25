@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { cn } from '@/lib/utils'
-import { Trash2, Star, Shield, ChevronDown, ChevronUp, Cpu, Brain, Zap, Plus, X } from 'lucide-vue-next'
+import { Trash2, Star, Shield, ChevronDown, ChevronUp, Cpu, Brain, Zap, Plus, X, Pencil } from 'lucide-vue-next'
 import Button from './ui/Button.vue'
 import type { ProviderInfo, ModelInfo } from '@/types/config'
 
@@ -20,6 +20,7 @@ const emit = defineEmits<{
   setFallback: [modelPath: string]
   addModel: [providerName: string]
   removeModel: [providerName: string, modelId: string]
+  edit: []
   delete: []
 }>()
 
@@ -113,7 +114,10 @@ const handleSetFallback = (model?: ModelInfo) => {
 
       <!-- 操作按钮 -->
       <div class="flex flex-col gap-1 flex-shrink-0">
-        <Button variant="ghost" size="sm" @click="emit('delete')" class="h-7 text-xs text-destructive">
+        <Button variant="ghost" size="sm" @click="emit('edit')" class="h-7 text-xs" title="编辑">
+          <Pencil class="w-3 h-3" />
+        </Button>
+        <Button variant="ghost" size="sm" @click="emit('delete')" class="h-7 text-xs text-destructive" title="删除">
           <Trash2 class="w-3 h-3" />
         </Button>
       </div>

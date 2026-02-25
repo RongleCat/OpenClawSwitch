@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { FolderOpen, FileJson, HardDrive, Cloud, RefreshCw } from 'lucide-vue-next'
+import { FolderOpen, FileJson, HardDrive, Cloud, RefreshCw, Monitor } from 'lucide-vue-next'
 import Button from './ui/Button.vue'
 import type { ConfigFileInfo } from '@/types/config'
 
@@ -21,16 +21,20 @@ const emit = defineEmits<{
 
 const modeLabel = computed(() => {
   if (!props.fileInfo) return ''
-  return props.fileInfo.mode === 'local' ? '本地模式' : '远程模式'
+  if (props.fileInfo.mode === 'local') return '本地模式'
+  if (props.fileInfo.mode === 'ssh') return 'SSH 模式'
+  return '远程模式'
 })
 
 const modeIcon = computed(() => {
   if (!props.fileInfo) return HardDrive
+  if (props.fileInfo.mode === 'ssh') return Monitor
   return props.fileInfo.mode === 'local' ? HardDrive : Cloud
 })
 
 const modeColor = computed(() => {
   if (!props.fileInfo) return 'text-gray-500'
+  if (props.fileInfo.mode === 'ssh') return 'text-purple-600 dark:text-purple-400'
   return props.fileInfo.mode === 'local'
     ? 'text-green-600 dark:text-green-400'
     : 'text-blue-600 dark:text-blue-400'

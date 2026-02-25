@@ -8,12 +8,16 @@ import Label from './components/ui/Label.vue'
 import Card from './components/ui/Card.vue'
 import Toast from './components/ui/Toast.vue'
 import ProviderCard from './components/ProviderCard.vue'
+import SshConnectModal from './components/SshConnectModal.vue'
+import SshFingerprintDialog from './components/SshFingerprintDialog.vue'
+import RemoteFileBrowser from './components/RemoteFileBrowser.vue'
 import {
   Server, Settings, ListTree, Save, Download, Plus, X, ChevronDown, FolderOpen, FileCode,
-  RefreshCw, Terminal, Wrench, Hammer
+  RefreshCw, Terminal, Wrench, Hammer, Monitor, WifiOff
 } from 'lucide-vue-next'
 import type {
-  OpenClawConfig, ProviderInfo, ModelSelectionInfo, ConfigFileInfo, ProviderPreset
+  OpenClawConfig, ProviderInfo, ModelSelectionInfo, ConfigFileInfo, ProviderPreset,
+  FingerprintInfo
 } from './types/config'
 
 // ============================================================================
@@ -33,6 +37,15 @@ const modelSelection = ref<ModelSelectionInfo>({ primary: null, fallbacks: [] })
 // UI 状态
 const loading = ref(false)
 
+// SSH 状态
+const showSshModal = ref(false)
+const showFingerprintDialog = ref(false)
+const showFileBrowser = ref(false)
+const sshConnected = ref(false)
+const sshFingerprint = ref<FingerprintInfo | null>(null)
+const sshFingerprintCallback = ref<(() => void) | null>(null)
+const sshRemotePath = ref('')
+
 // 弹窗状态
 const showProviderModal = ref(false)
 const showModelModal = ref(false)
@@ -49,6 +62,10 @@ const newProvider = ref({
   apiKey: ''
 })
 
+// 编辑态
+const isEditingProvider = ref(false)
+const editingProviderName = ref('')
+
 // 新模型表单
 const newModelId = ref('')
 
@@ -62,6 +79,7 @@ const showModelDropdown = ref(false)
 // ============================================================================
 
 const isLocalMode = computed(() => fileInfo.value?.mode === 'local')
+const isSshMode = computed(() => fileInfo.value?.mode === 'ssh')
 const canSave = computed(() => currentConfig.value && fileInfo.value)
 
 // 过滤后的模型列表（支持模糊搜索）
@@ -149,6 +167,11 @@ const selectFile = async () => {
 // 保存配置
 const saveConfig = async () => {
   if (!currentConfig.value || !fileInfo.value) return
+  // SSH 模式走专用保存逻辑
+  if (isSshMode.value) {
+    await saveSshConfig()
+    return
+  }
   loading.value = true
   try {
     await invoke('save_config', {
@@ -273,6 +296,22 @@ const setFallbackModel = async (modelPath: string) => {
 // 打开添加提供商弹窗
 const openProviderModal = () => {
   newProvider.value = { name: '', baseUrl: '', apiKey: '' }
+  isEditingProvider.value = false
+  editingProviderName.value = ''
+  showProviderModal.value = true
+}
+
+// 打开编辑提供商弹窗
+const openEditProviderModal = (providerName: string) => {
+  const providerConfig = currentConfig.value?.models?.providers?.[providerName]
+  if (!providerConfig) return
+  newProvider.value = {
+    name: providerName,
+    baseUrl: providerConfig.baseUrl || '',
+    apiKey: providerConfig.apiKey || ''
+  }
+  isEditingProvider.value = true
+  editingProviderName.value = providerName
   showProviderModal.value = true
 }
 
@@ -300,7 +339,7 @@ const addProvider = async () => {
 
     showProviderModal.value = false
     newProvider.value = { name: '', baseUrl: '', apiKey: '' }
-    showToast('success', `已添加: ${providerNameToAdd}`)
+    showToast('success', `${isEditingProvider.value ? '已更新' : '已添加'}: ${providerNameToAdd}`)
   } catch (error) {
     showToast('error', `添加失败: ${error}`)
   } finally {
@@ -591,11 +630,114 @@ const fixMinimaxDomestic = async () => {
   }
 }
 
+// ============================================================================
+// SSH 远程连接
+// ============================================================================
+
+// 处理指纹确认事件
+const handleFingerprint = (info: FingerprintInfo, onConfirm: () => void) => {
+  sshFingerprint.value = info
+  sshFingerprintCallback.value = onConfirm
+  showFingerprintDialog.value = true
+}
+
+// 确认指纹
+const confirmFingerprint = () => {
+  showFingerprintDialog.value = false
+  if (sshFingerprintCallback.value) {
+    sshFingerprintCallback.value()
+  }
+  sshFingerprint.value = null
+  sshFingerprintCallback.value = null
+}
+
+// 拒绝指纹
+const rejectFingerprint = async () => {
+  showFingerprintDialog.value = false
+  sshFingerprint.value = null
+  sshFingerprintCallback.value = null
+  await invoke('ssh_disconnect')
+  showToast('error', '已拒绝连接')
+}
+
+// SSH 连接成功
+const handleSshConnected = () => {
+  sshConnected.value = true
+  showSshModal.value = false
+  showFileBrowser.value = true
+  showToast('success', 'SSH 连接成功')
+}
+
+// SSH 断开连接
+const disconnectSsh = async () => {
+  try {
+    await invoke('ssh_disconnect')
+    sshConnected.value = false
+    sshRemotePath.value = ''
+    // 保留配置数据，仅重置 SSH 状态，用户可选择本地保存或重新连接
+    if (isSshMode.value && fileInfo.value) {
+      fileInfo.value = { ...fileInfo.value, mode: 'remote' }
+    }
+    showToast('success', '已断开 SSH 连接')
+  } catch (e) {
+    showToast('error', `断开失败: ${e}`)
+  }
+}
+
+// 从远程服务器加载配置文件
+const loadRemoteConfig = async (remotePath: string) => {
+  showFileBrowser.value = false
+  loading.value = true
+  try {
+    const content = await invoke<string>('ssh_read_file', { path: remotePath })
+    const config: OpenClawConfig = JSON.parse(content)
+    currentConfig.value = config
+    sshRemotePath.value = remotePath
+
+    const fileName = remotePath.split('/').pop() || 'openclaw.json'
+    const dirPath = remotePath.substring(0, remotePath.lastIndexOf('/'))
+    fileInfo.value = {
+      path: remotePath,
+      mode: 'ssh',
+      fileName,
+      dirPath,
+    }
+    isDirty.value = false
+    await refreshProviders()
+    showToast('success', `已加载远程配置: ${fileName}`)
+  } catch (e) {
+    showToast('error', `加载远程配置失败: ${e}`)
+  } finally {
+    loading.value = false
+  }
+}
+
+// SSH 模式保存配置
+const saveSshConfig = async () => {
+  if (!currentConfig.value || !sshRemotePath.value) return
+  loading.value = true
+  try {
+    const json = JSON.stringify(currentConfig.value, null, 2)
+    await invoke('ssh_write_file', {
+      path: sshRemotePath.value,
+      content: json,
+    })
+    isDirty.value = false
+    lastSaveTime.value = new Date().toLocaleString('zh-CN', { hour12: false })
+    showToast('success', '已保存到远程服务器')
+  } catch (e) {
+    showToast('error', `远程保存失败: ${e}`)
+  } finally {
+    loading.value = false
+  }
+}
+
 // 中国常见提供商预设
 const chineseProviderPresets: ProviderPreset[] = [
   { name: 'deepseek', displayName: 'DeepSeek', baseUrl: 'https://api.deepseek.com' },
   { name: 'nvidia', displayName: '英伟达', baseUrl: 'https://integrate.api.nvidia.com/v1' },
   { name: 'siliconflow', displayName: '硅基流动', baseUrl: 'https://api.siliconflow.cn/v1' },
+  { name: 'dashscope-coding', displayName: '百炼 Coding', baseUrl: 'https://coding.dashscope.aliyuncs.com/v1' },
 ]
 
 const fillPreset = (preset: ProviderPreset) => {
@@ -634,6 +776,20 @@ watch(currentConfig, () => {
 
         <!-- 右侧：操作按钮 -->
         <div class="flex items-center gap-2 flex-shrink-0">
+          <!-- SSH 连接/断开 -->
+          <Button v-if="!sshConnected" variant="outline" size="sm" @click="showSshModal = true" :disabled="loading">
+            <Monitor class="w-4 h-4" />
+            SSH
+          </Button>
+          <template v-else>
+            <Button variant="outline" size="sm" @click="showFileBrowser = true" :disabled="loading">
+              <Monitor class="w-4 h-4 text-green-600" />
+              浏览远程
+            </Button>
+            <Button variant="outline" size="sm" @click="disconnectSsh" :disabled="loading" class="text-red-600">
+              <WifiOff class="w-4 h-4" />
+            </Button>
+          </template>
           <Button variant="outline" size="sm" @click="selectFile" :disabled="loading">
             <Settings class="w-4 h-4" />
             选择文件
@@ -642,10 +798,15 @@ watch(currentConfig, () => {
             <FolderOpen class="w-4 h-4" />
             本地配置
           </Button>
-          <Button v-if="!isLocalMode && canSave" variant="outline" size="sm" @click="saveConfig" :disabled="loading || !isDirty">
+          <Button v-if="isSshMode && canSave" variant="default" size="sm" @click="saveConfig" :disabled="loading || !isDirty"
+                  class="bg-purple-600 hover:bg-purple-700 text-white">
+            <Save class="w-4 h-4" />
+            保存到远程
+          </Button>
+          <Button v-else-if="!isLocalMode && canSave" variant="outline" size="sm" @click="saveConfig" :disabled="loading || !isDirty">
             <Save class="w-4 h-4" />
           </Button>
-          <Button v-if="canSave" variant="outline" size="sm" @click="saveConfigAs" :disabled="loading">
+          <Button v-if="canSave && !isSshMode" variant="outline" size="sm" @click="saveConfigAs" :disabled="loading">
             <Download class="w-4 h-4" />
           </Button>
           <Button v-if="currentConfig" variant="outline" size="sm" @click="showSourceModal = true">
@@ -658,8 +819,12 @@ watch(currentConfig, () => {
       <!-- 文件路径信息行 -->
       <div v-if="fileInfo" class="flex items-center gap-2 mt-2 text-sm">
         <span class="px-1.5 py-0.5 rounded text-xs font-medium"
-              :class="isLocalMode ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' : 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'">
-          {{ isLocalMode ? '本地' : '远程' }}
+              :class="isLocalMode
+                ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'
+                : isSshMode
+                  ? 'bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300'
+                  : 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'">
+          {{ isLocalMode ? '本地' : isSshMode ? 'SSH' : '远程' }}
         </span>
         <span class="text-muted-foreground truncate" :title="fileInfo.path">
           {{ fileInfo.path }}
@@ -815,6 +980,7 @@ watch(currentConfig, () => {
                 @set-fallback="setFallbackModel"
                 @add-model="openModelModal(provider.name)"
                 @remove-model="removeModelFromProvider"
+                @edit="openEditProviderModal(provider.name)"
                 @delete="deleteProvider(provider.name)"
               />
             </div>
@@ -826,12 +992,12 @@ watch(currentConfig, () => {
     <!-- 添加提供商弹窗 -->
     <div v-if="showProviderModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" @click.self="showProviderModal = false">
       <Card class="w-full max-w-md p-6 m-4">
-        <h3 class="font-semibold text-lg mb-4">添加服务商</h3>
+        <h3 class="font-semibold text-lg mb-4">{{ isEditingProvider ? '编辑服务商' : '添加服务商' }}</h3>
 
         <div class="space-y-4">
           <div>
             <Label class="text-sm mb-1 block">服务商名称 *</Label>
-            <Input v-model="newProvider.name" placeholder="例如: openai" :disabled="loading" />
+            <Input v-model="newProvider.name" placeholder="例如: openai" :disabled="loading || isEditingProvider" />
           </div>
           <div>
             <Label class="text-sm mb-1 block">Base URL *</Label>
@@ -859,8 +1025,8 @@ watch(currentConfig, () => {
         <div class="flex justify-end gap-2 mt-6">
           <Button variant="ghost" @click="showProviderModal = false">取消</Button>
           <Button @click="addProvider" :disabled="loading">
-            <Plus class="w-4 h-4" />
-            添加
+            <Plus v-if="!isEditingProvider" class="w-4 h-4" />
+            {{ isEditingProvider ? '保存' : '添加' }}
           </Button>
         </div>
       </Card>
@@ -880,7 +1046,6 @@ watch(currentConfig, () => {
                 @input="newModelId = ($event.target as HTMLInputElement).value"
                 @focus="handleDropdownOpen"
                 placeholder="搜索模型或手动输入"
-                :disabled="loadingModels"
                 @keyup.enter="addModelFromModal"
                 autocomplete="off"
                 autocorrect="off"
@@ -947,6 +1112,29 @@ watch(currentConfig, () => {
         </div>
       </Card>
     </div>
+
+    <!-- SSH 连接弹窗 -->
+    <SshConnectModal
+      v-if="showSshModal"
+      @close="showSshModal = false"
+      @connected="handleSshConnected"
+      @fingerprint="handleFingerprint"
+    />
+
+    <!-- SSH 指纹确认弹窗 -->
+    <SshFingerprintDialog
+      v-if="showFingerprintDialog && sshFingerprint"
+      :fingerprint="sshFingerprint"
+      @confirm="confirmFingerprint"
+      @reject="rejectFingerprint"
+    />
+
+    <!-- 远程文件浏览器 -->
+    <RemoteFileBrowser
+      v-if="showFileBrowser"
+      @close="showFileBrowser = false"
+      @select="loadRemoteConfig"
+    />
 
     <!-- Toast 通知 -->
     <Toast
