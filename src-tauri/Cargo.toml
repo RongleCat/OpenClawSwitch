@@ -1,6 +1,6 @@
 [package]
 name = "openclawswitch"
-version = "1.1.0"  # [VERSION] 保持与 package.json 和 tauri.conf.json 同步
+version = "1.2.0"  # [VERSION] 保持与 package.json 和 tauri.conf.json 同步
 description = "OpenClawSwitch - OpenClaw configuration manager"
 authors = ["RongleCat"]
 license = "MIT"

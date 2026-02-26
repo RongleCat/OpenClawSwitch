@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.2.0] - 2026-02-26
+
+### ✨ 新功能
+
+- **粘贴配置导入**：添加服务商时支持直接粘贴 JSON 配置，自动解析提取服务商信息和模型列表
+- **智能 JSON 解析**：支持多种非标准 JSON 格式，包括 `models.providers` 嵌套、`providers` 片段、`name: provider` 片段等
+- **分段器切换**：添加服务商弹窗新增「手动配置 / 粘贴配置」Tab 切换，编辑模式始终为手动回填
+- **API Key 双向绑定**：粘贴模式下 API Key 独立输入框与 JSON 配置双向同步
+- **名称智能提取**：从 JSON 结构中自动提取服务商名称，无法提取时由用户手动输入
+
+### 🐛 修复
+
+- 修复删除服务商时确认弹窗弹出的同时服务商已被删除的问题（替换原生 `confirm` 为 Tauri `ask` 对话框）
+- SSH 模式下禁用「重启网关」和「打开 TUI」按钮，避免无效操作
+
+### 🔧 技术细节
+
+- 新增 Rust 后端命令 `import_provider`，支持一次性导入包含 models 数组的完整服务商配置
+- 新增 `src/utils/parseProviderJson.ts` 纯函数，从 App.vue 中提取解析逻辑便于测试
+- 新增 `tests/parseProviderJson.test.ts` 单元测试（10 个用例），覆盖所有 JSON 格式变体
+- 引入 vitest 测试框架
+
 ## [1.1.0] - 2026-02-25
 
 ### ✨ 新功能

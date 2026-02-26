@@ -422,6 +422,36 @@ fn upsert_provider(
     Ok(config)
 }
 
+/// 导入完整的提供商配置（含 models 数组）
+#[tauri::command]
+fn import_provider(
+    mut config: Value,
+    name: String,
+    provider_json: Value,
+) -> Result<Value, String> {
+    // 确保 models.providers 结构存在
+    if config.get("models").is_none() {
+        config["models"] = json!({});
+    }
+    if config["models"].get("providers").is_none() {
+        config["models"]["providers"] = json!({});
+    }
+
+    // 验证 provider_json 必须包含 baseUrl
+    if provider_json.get("baseUrl").is_none() {
+        return Err("配置缺少 baseUrl 字段".to_string());
+    }
+
+    // 如果没有 api 类型，默认设置
+    let mut provider = provider_json;
+    if provider.get("api").is_none() {
+        provider["api"] = json!("openai-completions");
+    }
+
+    config["models"]["providers"][&name] = provider;
+    Ok(config)
+}
+
 /// 删除提供商
 #[tauri::command]
 fn delete_provider(mut config: Value, name: String) -> Result<Value, String> {
@@ -789,6 +819,7 @@ fn main() {
             set_primary_model,
             set_fallback_models,
             upsert_provider,
+            import_provider,
             delete_provider,
             add_model_to_provider,
             remove_model_from_provider,

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, onUnmounted } from 'vue'
 import { invoke } from '@tauri-apps/api/tauri'
-import { open, save } from '@tauri-apps/api/dialog'
+import { open, save, ask } from '@tauri-apps/api/dialog'
 import Button from './components/ui/Button.vue'
 import Input from './components/ui/Input.vue'
 import Label from './components/ui/Label.vue'
@@ -61,6 +61,14 @@ const newProvider = ref({
   baseUrl: '',
   apiKey: ''
 })
+
+// 粘贴配置模式
+const providerModalTab = ref<'manual' | 'paste'>('manual')
+const pasteJsonText = ref('')
+const pasteProviderName = ref('')
+const pasteApiKey = ref('')
+const pasteParseError = ref('')
+const parsedProviderConfig = ref<import('./types/config').ProviderConfig | null>(null)
 
 // 编辑态
 const isEditingProvider = ref(false)
@@ -298,10 +306,16 @@ const openProviderModal = () => {
   newProvider.value = { name: '', baseUrl: '', apiKey: '' }
   isEditingProvider.value = false
   editingProviderName.value = ''
+  providerModalTab.value = 'manual'
+  pasteJsonText.value = ''
+  pasteProviderName.value = ''
+  pasteApiKey.value = ''
+  pasteParseError.value = ''
+  parsedProviderConfig.value = null
   showProviderModal.value = true
 }
 
-// 打开编辑提供商弹窗
+// 打开编辑提供商弹窗（始终手动模式）
 const openEditProviderModal = (providerName: string) => {
   const providerConfig = currentConfig.value?.models?.providers?.[providerName]
   if (!providerConfig) return
@@ -312,12 +326,95 @@ const openEditProviderModal = (providerName: string) => {
   }
   isEditingProvider.value = true
   editingProviderName.value = providerName
+  providerModalTab.value = 'manual'
   showProviderModal.value = true
 }
+
+// 解析粘贴的 JSON 配置（调用纯函数）
+import { parseProviderJson as _parseJson } from './utils/parseProviderJson'
+
+const handlePasteJsonChange = (text: string) => {
+  if (!text.trim()) {
+    parsedProviderConfig.value = null
+    pasteParseError.value = ''
+    return
+  }
+
+  const result = _parseJson(text)
+  parsedProviderConfig.value = result.provider
+  pasteParseError.value = result.error
+
+  if (result.provider) {
+    // 同步 apiKey 到独立输入框（仅首次解析时）
+    if (result.provider.apiKey && result.provider.apiKey !== 'YOUR_API_KEY') {
+      pasteApiKey.value = result.provider.apiKey
+    }
+    // 同步名称
+    if (result.name && !pasteProviderName.value) {
+      pasteProviderName.value = result.name
+    }
+  }
+}
+
+// 监听 JSON 文本变化实时解析
+watch(pasteJsonText, (val) => {
+  handlePasteJsonChange(val)
+})
+
+// API Key 输入框变更时反向同步到解析结果
+watch(pasteApiKey, (val) => {
+  if (parsedProviderConfig.value) {
+    parsedProviderConfig.value = { ...parsedProviderConfig.value, apiKey: val }
+  }
+})
 
 // 添加提供商
 const addProvider = async () => {
   if (!currentConfig.value) return
+
+  // 粘贴模式
+  if (providerModalTab.value === 'paste') {
+    if (!pasteProviderName.value.trim()) {
+      showToast('error', '请填写服务商名称')
+      return
+    }
+    if (!parsedProviderConfig.value) {
+      showToast('error', '请粘贴有效的 JSON 配置')
+      return
+    }
+    if (!pasteApiKey.value.trim()) {
+      showToast('error', '请填写 API Key')
+      return
+    }
+
+    loading.value = true
+    const name = pasteProviderName.value.trim()
+    try {
+      // 构建完整的 provider 配置，用独立输入框的 apiKey 覆盖
+      const providerJson = {
+        ...parsedProviderConfig.value,
+        apiKey: pasteApiKey.value.trim()
+      }
+      currentConfig.value = await invoke<OpenClawConfig>('import_provider', {
+        config: currentConfig.value,
+        name,
+        providerJson
+      })
+      isDirty.value = true
+      await refreshProviders()
+      await autoSave()
+      showProviderModal.value = false
+      const modelCount = parsedProviderConfig.value.models?.length || 0
+      showToast('success', `已导入: ${name}（${modelCount} 个模型）`)
+    } catch (error) {
+      showToast('error', `导入失败: ${error}`)
+    } finally {
+      loading.value = false
+    }
+    return
+  }
+
+  // 手动模式（原有逻辑）
   if (!newProvider.value.name.trim() || !newProvider.value.baseUrl.trim()) {
     showToast('error', '请填写服务商名称和 Base URL')
     return
@@ -350,7 +447,8 @@ const addProvider = async () => {
 // 删除提供商
 const deleteProvider = async (providerName: string) => {
   if (!currentConfig.value) return
-  if (!confirm(`确定要删除提供商 "${providerName}" 吗？`)) return
+  const confirmed = await ask(`确定要删除提供商 "${providerName}" 吗？`, { title: '确认删除', type: 'warning' })
+  if (!confirmed) return
 
   try {
     currentConfig.value = await invoke<OpenClawConfig>('delete_provider', {
@@ -921,7 +1019,7 @@ watch(currentConfig, () => {
                   variant="outline"
                   size="sm"
                   @click="restartGateway"
-                  :disabled="toolLoading !== null"
+                  :disabled="toolLoading !== null || isSshMode"
                   class="w-full justify-start gap-2"
                 >
                   <RefreshCw class="w-4 h-4" :class="{ 'animate-spin': toolLoading === 'restart' }" />
@@ -931,7 +1029,7 @@ watch(currentConfig, () => {
                   variant="outline"
                   size="sm"
                   @click="openTui"
-                  :disabled="toolLoading !== null"
+                  :disabled="toolLoading !== null || isSshMode"
                   class="w-full justify-start gap-2"
                 >
                   <Terminal class="w-4 h-4" />
@@ -994,7 +1092,26 @@ watch(currentConfig, () => {
       <Card class="w-full max-w-md p-6 m-4">
         <h3 class="font-semibold text-lg mb-4">{{ isEditingProvider ? '编辑服务商' : '添加服务商' }}</h3>
 
-        <div class="space-y-4">
+        <!-- 分段器（编辑模式不显示） -->
+        <div v-if="!isEditingProvider" class="flex rounded-lg bg-gray-100 dark:bg-gray-800 p-1 mb-4">
+          <button
+            @click="providerModalTab = 'manual'"
+            class="flex-1 px-3 py-1.5 text-sm rounded-md transition-colors"
+            :class="providerModalTab === 'manual' ? 'bg-white dark:bg-gray-700 shadow-sm font-medium' : 'text-muted-foreground hover:text-foreground'"
+          >
+            手动配置
+          </button>
+          <button
+            @click="providerModalTab = 'paste'"
+            class="flex-1 px-3 py-1.5 text-sm rounded-md transition-colors"
+            :class="providerModalTab === 'paste' ? 'bg-white dark:bg-gray-700 shadow-sm font-medium' : 'text-muted-foreground hover:text-foreground'"
+          >
+            粘贴配置
+          </button>
+        </div>
+
+        <!-- 手动配置模式 -->
+        <div v-if="providerModalTab === 'manual' || isEditingProvider" class="space-y-4">
           <div>
             <Label class="text-sm mb-1 block">服务商名称 *</Label>
             <Input v-model="newProvider.name" placeholder="例如: openai" :disabled="loading || isEditingProvider" />
@@ -1022,11 +1139,38 @@ watch(currentConfig, () => {
           </div>
         </div>
 
+        <!-- 粘贴配置模式 -->
+        <div v-if="providerModalTab === 'paste' && !isEditingProvider" class="space-y-3">
+          <div>
+            <Label class="text-sm mb-1 block">服务商名称 *</Label>
+            <Input v-model="pasteProviderName" placeholder="例如: bailian" :disabled="loading" />
+          </div>
+          <div>
+            <Label class="text-sm mb-1 block">JSON 配置 *</Label>
+            <textarea
+              v-model="pasteJsonText"
+              placeholder='粘贴服务商提供的 JSON 配置，支持包含 providers 的完整配置或单个服务商配置'
+              :disabled="loading"
+              rows="8"
+              class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 resize-none font-mono"
+            />
+            <!-- 解析状态 -->
+            <p v-if="pasteParseError" class="text-xs text-red-500 mt-1">{{ pasteParseError }}</p>
+            <p v-else-if="parsedProviderConfig" class="text-xs text-green-600 dark:text-green-400 mt-1">
+              ✓ 解析成功，包含 {{ parsedProviderConfig.models?.length || 0 }} 个模型
+            </p>
+          </div>
+          <div>
+            <Label class="text-sm mb-1 block">API Key *</Label>
+            <Input v-model="pasteApiKey" type="password" placeholder="sk-..." :disabled="loading" />
+          </div>
+        </div>
+
         <div class="flex justify-end gap-2 mt-6">
           <Button variant="ghost" @click="showProviderModal = false">取消</Button>
           <Button @click="addProvider" :disabled="loading">
             <Plus v-if="!isEditingProvider" class="w-4 h-4" />
-            {{ isEditingProvider ? '保存' : '添加' }}
+            {{ isEditingProvider ? '保存' : providerModalTab === 'paste' ? '导入' : '添加' }}
           </Button>
         </div>
       </Card>
