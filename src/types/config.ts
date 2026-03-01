@@ -149,3 +149,73 @@ export interface ConfigSearchResult {
   fileName: string
   dirPath: string
 }
+
+// ============================================================================
+// 安装管理相关类型
+// ============================================================================
+
+/** OpenClaw 安装状态 */
+export interface OpenClawStatus {
+  installed: boolean
+  version: string | null
+  path: string | null
+}
+
+/** Node.js 安装状态 */
+export interface NodeStatus {
+  installed: boolean
+  version: string | null
+  meetsRequirement: boolean
+}
+
+/** Git 安装状态 */
+export interface GitStatusInfo {
+  installed: boolean
+  version: string | null
+}
+
+/** fnm 安装状态 */
+export interface FnmStatus {
+  installed: boolean
+  version: string | null
+}
+
+/** 系统信息 */
+export interface SystemInfo {
+  os: 'windows' | 'macos' | 'linux'
+  arch: 'x86_64' | 'aarch64'
+  shell: string
+}
+
+/** 环境检测综合结果 */
+export interface EnvironmentStatus {
+  openclaw: OpenClawStatus
+  node: NodeStatus
+  git: GitStatusInfo
+  fnm: FnmStatus
+  system: SystemInfo
+  networkRegion: string
+}
+
+/** 安装日志事件 */
+export interface InstallLogEvent {
+  step: string
+  message: string
+  level: 'info' | 'warn' | 'error' | 'success'
+  timestamp: number
+}
+
+/** 安装进度事件 */
+export interface InstallProgressEvent {
+  currentStep: number
+  totalSteps: number
+  stepName: string
+  status: 'running' | 'success' | 'error'
+}
+
+// ============================================================================
+// 导航相关类型
+// ============================================================================
+
+/** 页面 ID */
+export type PageId = 'home' | 'install' | 'config' | 'ssh' | 'tools'

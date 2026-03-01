@@ -3,11 +3,61 @@
 
 use serde::{Deserialize, Serialize};
 use ssh2::Session;
+use std::collections::HashSet;
+use std::fs;
 use std::io::Read;
 use std::net::TcpStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::State;
+
+// ============================================================================
+// Known Hosts 管理
+// ============================================================================
+
+fn get_known_hosts_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".openclaw")
+        .join("known_hosts")
+}
+
+fn load_known_hosts() -> HashSet<String> {
+    let path = get_known_hosts_path();
+    if !path.exists() {
+        return HashSet::new();
+    }
+
+    fs::read_to_string(&path)
+        .ok()
+        .map(|content| {
+            content
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| line.trim().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn save_known_host(fingerprint: &str) -> Result<(), String> {
+    let path = get_known_hosts_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+    }
+
+    let mut hosts = load_known_hosts();
+    hosts.insert(fingerprint.to_string());
+
+    let content = hosts.into_iter().collect::<Vec<_>>().join("\n");
+    fs::write(&path, content).map_err(|e| format!("写入文件失败: {}", e))?;
+
+    Ok(())
+}
+
+fn is_host_known(fingerprint: &str) -> bool {
+    load_known_hosts().contains(fingerprint)
+}
 
 // ============================================================================
 // 类型定义
@@ -172,8 +222,8 @@ pub fn ssh_connect(
         .ok_or("无法获取 SHA-256 指纹")?;
     let sha256 = format!("SHA256:{}", format_fingerprint_base64(sha256_bytes));
 
-    // 检查 known_hosts（简化实现：始终标记为未知，由前端确认）
-    let is_known = false;
+    // 检查 known_hosts
+    let is_known = is_host_known(&sha256);
 
     let fingerprint = FingerprintInfo {
         sha256,
@@ -191,6 +241,12 @@ pub fn ssh_connect(
     });
 
     Ok(fingerprint)
+}
+
+/// 保存主机指纹到 known_hosts
+#[tauri::command]
+pub fn ssh_save_fingerprint(fingerprint: String) -> Result<(), String> {
+    save_known_host(&fingerprint)
 }
 
 /// 使用密码认证
@@ -554,4 +610,159 @@ fn strip_ansi_escapes(input: &str) -> String {
     }
 
     String::from_utf8(result).unwrap_or_else(|_| input.to_string())
+}
+
+// ============================================================================
+// SSH 远程环境检测
+// ============================================================================
+
+/// 通过 SSH 检测远程服务器的 OpenClaw 环境状态
+#[tauri::command]
+pub fn ssh_check_environment(
+    manager: State<SshManager>,
+) -> Result<crate::installer::EnvironmentStatus, String> {
+    let conn = manager
+        .connection
+        .lock()
+        .map_err(|e| format!("锁错误: {}", e))?;
+    let conn = conn.as_ref().ok_or("未建立 SSH 连接")?;
+    if !conn.session.authenticated() {
+        return Err("SSH 未认证".to_string());
+    }
+
+    // 一次性执行多条检测命令，减少 round-trip
+    let detect_script = r#"
+echo "===OPENCLAW_VERSION==="
+openclaw --version 2>/dev/null || echo "__NOT_INSTALLED__"
+echo "===OPENCLAW_PATH==="
+which openclaw 2>/dev/null || echo "__NOT_FOUND__"
+echo "===NODE_VERSION==="
+node --version 2>/dev/null || echo "__NOT_INSTALLED__"
+echo "===GIT_VERSION==="
+git --version 2>/dev/null || echo "__NOT_INSTALLED__"
+echo "===FNM_VERSION==="
+fnm --version 2>/dev/null || echo "__NOT_INSTALLED__"
+echo "===SYSTEM_INFO==="
+uname -s && uname -m && basename "$SHELL" 2>/dev/null || echo "unknown"
+echo "===END==="
+"#;
+
+    let output = exec_remote_command(&conn.session, detect_script)?;
+
+    // 解析输出
+    let get_section = |key: &str| -> String {
+        let start_marker = format!("==={}===", key);
+        let lines: Vec<&str> = output.lines().collect();
+        let mut capture = false;
+        let mut result = Vec::new();
+        for line in &lines {
+            if line.contains(&start_marker) {
+                capture = true;
+                continue;
+            }
+            if capture && line.contains("===") {
+                break;
+            }
+            if capture {
+                result.push(line.trim());
+            }
+        }
+        result.join("\n").trim().to_string()
+    };
+
+    // OpenClaw
+    let oc_version_raw = get_section("OPENCLAW_VERSION");
+    let oc_path_raw = get_section("OPENCLAW_PATH");
+    let oc_installed = !oc_version_raw.contains("__NOT_INSTALLED__");
+    let openclaw = crate::installer::OpenClawStatus {
+        installed: oc_installed,
+        version: if oc_installed {
+            Some(oc_version_raw)
+        } else {
+            None
+        },
+        path: if oc_path_raw.contains("__NOT_FOUND__") {
+            None
+        } else {
+            Some(oc_path_raw)
+        },
+    };
+
+    // Node.js
+    let node_raw = get_section("NODE_VERSION");
+    let node_installed = !node_raw.contains("__NOT_INSTALLED__");
+    let node_version = if node_installed {
+        Some(node_raw.trim_start_matches('v').to_string())
+    } else {
+        None
+    };
+    let node_major: u32 = node_version
+        .as_deref()
+        .and_then(|v| v.split('.').next())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let node = crate::installer::NodeStatus {
+        installed: node_installed,
+        version: node_version,
+        meets_requirement: node_major >= 22,
+    };
+
+    // Git
+    let git_raw = get_section("GIT_VERSION");
+    let git_installed = !git_raw.contains("__NOT_INSTALLED__");
+    let git = crate::installer::GitStatus {
+        installed: git_installed,
+        version: if git_installed {
+            Some(git_raw.replace("git version ", "").trim().to_string())
+        } else {
+            None
+        },
+    };
+
+    // fnm
+    let fnm_raw = get_section("FNM_VERSION");
+    let fnm_installed = !fnm_raw.contains("__NOT_INSTALLED__");
+    let fnm = crate::installer::FnmStatus {
+        installed: fnm_installed,
+        version: if fnm_installed {
+            Some(fnm_raw.replace("fnm ", "").trim().to_string())
+        } else {
+            None
+        },
+    };
+
+    // 系统信息
+    let sys_raw = get_section("SYSTEM_INFO");
+    let sys_lines: Vec<&str> = sys_raw.lines().collect();
+    let os_name = sys_lines.first().unwrap_or(&"linux").to_lowercase();
+    let os = if os_name.contains("darwin") {
+        "macos"
+    } else if os_name.contains("windows") || os_name.contains("mingw") {
+        "windows"
+    } else {
+        "linux"
+    }
+    .to_string();
+    let arch_raw = sys_lines.get(1).unwrap_or(&"x86_64").to_lowercase();
+    let arch = if arch_raw.contains("aarch64") || arch_raw.contains("arm64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    }
+    .to_string();
+    let shell = sys_lines
+        .get(2)
+        .unwrap_or(&"sh")
+        .to_string();
+
+    let system = crate::installer::SystemInfo { os, arch, shell };
+
+    Ok(crate::installer::EnvironmentStatus {
+        openclaw,
+        node,
+        git,
+        fnm,
+        system,
+        network_region: "unknown".to_string(),
+    })
 }

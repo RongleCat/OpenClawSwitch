@@ -9,6 +9,7 @@ use std::process::Command;
 
 mod ssh;
 mod ssh_profiles;
+mod installer;
 
 // ============================================================================
 // 类型定义说明
@@ -829,6 +830,7 @@ fn main() {
             open_tui,
             // SSH 连接
             ssh::ssh_connect,
+            ssh::ssh_save_fingerprint,
             ssh::ssh_auth_password,
             ssh::ssh_auth_key,
             ssh::ssh_disconnect,
@@ -837,10 +839,24 @@ fn main() {
             ssh::ssh_read_file,
             ssh::ssh_write_file,
             ssh::ssh_search_config,
+            ssh::ssh_check_environment,
             // SSH 配置管理
             ssh_profiles::ssh_save_profile,
             ssh_profiles::ssh_load_profiles,
             ssh_profiles::ssh_delete_profile,
+            // 安装管理
+            installer::check_openclaw_installed,
+            installer::check_node_installed,
+            installer::check_git_installed,
+            installer::check_fnm_installed,
+            installer::get_system_info,
+            installer::detect_network_region,
+            installer::check_environment,
+            installer::install_fnm,
+            installer::install_node_via_fnm,
+            installer::install_openclaw,
+            installer::install_git,
+            installer::run_full_install,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
