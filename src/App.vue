@@ -159,7 +159,33 @@ const handleSshConnected = async () => {
 // 工具面板
 // ============================================================================
 
-const openToolPanel = (toolId: string) => {
+const openToolPanel = async (toolId: string) => {
+  // 对于 webui 和 doctor，直接执行操作而不是打开面板
+  if (toolId === 'webui') {
+    try {
+      await invoke<string>('open_web_ui')
+      showToast('success', '已打开 Web UI')
+    } catch (e) {
+      showToast('error', `打开 Web UI 失败: ${e}`)
+    }
+    return
+  }
+
+  if (toolId === 'doctor') {
+    try {
+      loading.value = true
+      await invoke<string>('run_doctor_fix')
+      showToast('success', '诊断修复完成')
+      await checkEnvironment()
+    } catch (e) {
+      showToast('error', `诊断修复失败: ${e}`)
+    } finally {
+      loading.value = false
+    }
+    return
+  }
+
+  // 其他工具切换面板显示
   activeToolPanel.value = activeToolPanel.value === toolId ? null : toolId
 }
 
@@ -207,49 +233,49 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="h-screen flex flex-col bg-gray-50 dark:bg-gray-900 overflow-hidden">
+  <div class="h-screen flex flex-col bg-gray-50 overflow-hidden">
     <!-- 顶部栏 -->
-    <header class="flex-shrink-0 border-b bg-white dark:bg-gray-800 px-4 py-2.5">
+    <header class="flex-shrink-0 bg-slate-800 px-6 py-3 shadow-sm">
       <div class="flex items-center justify-between">
         <!-- 左侧：环境选择器 -->
         <div class="flex items-center gap-3">
           <div class="relative">
             <button
               @click="showEnvDropdown = !showEnvDropdown"
-              class="flex items-center gap-2 px-3 py-1.5 rounded-lg border bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 transition-colors min-w-[160px]"
+              class="flex items-center gap-2 px-4 py-2 rounded-md bg-slate-700 hover:bg-slate-600 text-white transition-colors min-w-[160px]"
             >
               <component
                 :is="currentEnv.mode === 'local' ? Monitor : Wifi"
                 class="w-4 h-4"
-                :class="currentEnv.mode === 'local' ? 'text-blue-500' : sshConnected ? 'text-green-500' : 'text-gray-400'"
+                :class="currentEnv.mode === 'local' ? 'text-blue-400' : sshConnected ? 'text-green-400' : 'text-gray-400'"
               />
               <span class="text-sm font-medium truncate">{{ currentEnv.label }}</span>
-              <ChevronDown class="w-4 h-4 ml-auto text-gray-400" :class="{ 'rotate-180': showEnvDropdown }" />
+              <ChevronDown class="w-4 h-4 ml-auto text-gray-300" :class="{ 'rotate-180': showEnvDropdown }" />
             </button>
 
             <!-- 环境下拉列表 -->
             <div
               v-if="showEnvDropdown"
-              class="absolute top-full left-0 mt-1 w-56 bg-white dark:bg-gray-800 border rounded-lg shadow-lg z-50"
+              class="absolute top-full left-0 mt-1 w-56 bg-white border border-gray-200 rounded-lg shadow-lg z-50"
             >
               <div
                 v-for="(env, i) in environments"
                 :key="i"
                 @click="selectEnvironment(i)"
-                class="flex items-center gap-2 px-3 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer text-sm"
-                :class="{ 'bg-blue-50 dark:bg-blue-900/20': i === currentEnvIndex }"
+                class="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 cursor-pointer text-sm"
+                :class="{ 'bg-blue-50': i === currentEnvIndex }"
               >
                 <component
                   :is="env.mode === 'local' ? Monitor : Wifi"
                   class="w-4 h-4"
                   :class="env.mode === 'local' ? 'text-blue-500' : 'text-green-500'"
                 />
-                <span class="truncate">{{ env.label }}</span>
+                <span class="truncate text-gray-700">{{ env.label }}</span>
               </div>
-              <div class="border-t">
+              <div class="border-t border-gray-200">
                 <button
                   @click="addSshEnvironment"
-                  class="flex items-center gap-2 px-3 py-2 w-full hover:bg-gray-100 dark:hover:bg-gray-700 text-sm text-blue-600"
+                  class="flex items-center gap-2 px-3 py-2 w-full hover:bg-gray-50 text-sm text-blue-600"
                 >
                   <Plus class="w-4 h-4" />
                   添加 SSH 连接
@@ -258,15 +284,15 @@ onMounted(async () => {
             </div>
           </div>
 
-          <h1 class="font-bold text-lg text-gray-700 dark:text-gray-300">OpenClawSwitch</h1>
+          <h1 class="font-bold text-lg text-white">OpenClawSwitch</h1>
         </div>
 
         <!-- 右侧：状态指示 -->
-        <div class="flex items-center gap-2 text-sm text-muted-foreground">
+        <div class="flex items-center gap-2 text-sm text-gray-300">
           <span v-if="envStatus" class="flex items-center gap-1">
             <span
               class="w-2 h-2 rounded-full"
-              :class="openclawInstalled ? 'bg-green-500' : 'bg-red-400'"
+              :class="openclawInstalled ? 'bg-green-400' : 'bg-red-400'"
             />
             {{ openclawInstalled ? `OpenClaw ${envStatus.openclaw.version || ''}` : '未安装' }}
           </span>
@@ -295,8 +321,8 @@ onMounted(async () => {
         />
 
         <!-- 加载中 -->
-        <div v-else class="flex items-center justify-center h-full">
-          <div class="text-center text-muted-foreground">
+        <div v-else class="flex items-center justify-center h-full bg-gray-50">
+          <div class="text-center text-gray-500">
             <div class="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
             <p class="text-sm">正在检测环境...</p>
           </div>
@@ -307,7 +333,7 @@ onMounted(async () => {
       <transition name="fade">
         <div
           v-if="activeToolPanel === 'config'"
-          class="absolute inset-0 bg-white dark:bg-gray-800 z-50 flex flex-col"
+          class="absolute inset-0 bg-white z-50 flex flex-col"
         >
           <ConfigPage
             :show-toast="showToast"
@@ -340,7 +366,7 @@ onMounted(async () => {
 
     <!-- Loading 遮罩 -->
     <div v-if="loading" class="fixed inset-0 bg-black/20 flex items-center justify-center z-[100]">
-      <div class="bg-white dark:bg-gray-800 rounded-lg p-4 shadow-xl flex items-center gap-3">
+      <div class="bg-white rounded-lg p-4 shadow-xl flex items-center gap-3">
         <div class="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
         <span class="text-sm font-medium">加载中...</span>
       </div>

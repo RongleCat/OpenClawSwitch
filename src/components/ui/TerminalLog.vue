@@ -41,7 +41,7 @@ const levelPrefix = (level: string) => {
 <template>
   <div
     ref="containerRef"
-    class="bg-gray-900 rounded-lg p-4 font-mono text-sm overflow-auto h-full min-h-0"
+    class="bg-gray-900 rounded-lg p-4 font-mono text-xs overflow-auto h-full min-h-0"
   >
     <div v-if="logs.length === 0" class="text-gray-500 text-center py-8">
       等待安装开始...

@@ -832,13 +832,13 @@ const loadRemoteDefaultConfig = async () => {
 </script>
 
 <template>
-  <div class="h-full flex flex-col overflow-hidden">
+  <div class="h-full flex flex-col overflow-hidden bg-white">
     <!-- 顶部栏 -->
-    <header class="flex-shrink-0 border-b bg-white dark:bg-gray-800 px-4 py-2">
+    <header class="flex-shrink-0 border-b border-gray-200 bg-white px-6 py-3">
       <div class="flex items-center justify-between gap-4">
         <div class="flex items-center gap-2">
           <Server class="w-5 h-5 text-blue-600 flex-shrink-0" />
-          <h2 class="font-bold text-base whitespace-nowrap">模型配置</h2>
+          <h2 class="font-bold text-lg text-gray-900 whitespace-nowrap">模型配置</h2>
         </div>
 
         <div class="flex items-center gap-2 flex-shrink-0">
@@ -893,54 +893,54 @@ const loadRemoteDefaultConfig = async () => {
       </div>
 
       <div v-if="fileInfo" class="flex items-center gap-2 mt-2 text-sm">
-        <span class="px-1.5 py-0.5 rounded text-xs font-medium"
+        <span class="px-2 py-0.5 rounded text-xs font-medium"
               :class="isLocalMode
-                ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'
+                ? 'bg-green-100 text-green-700'
                 : isSshMode
-                  ? 'bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300'
-                  : 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'">
+                  ? 'bg-purple-100 text-purple-700'
+                  : 'bg-blue-100 text-blue-700'">
           {{ isLocalMode ? '本地' : isSshMode ? 'SSH' : '远程' }}
         </span>
-        <span class="text-muted-foreground truncate" :title="fileInfo.path">
+        <span class="text-gray-600 truncate" :title="fileInfo.path">
           {{ fileInfo.path }}
         </span>
         <span v-if="isDirty && !isLocalMode" class="text-amber-500">●</span>
-        <span v-if="lastSaveTime" class="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300">
+        <span v-if="lastSaveTime" class="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">
           保存于 {{ lastSaveTime }}
         </span>
       </div>
     </header>
 
     <!-- 主内容区域 -->
-    <main class="flex-1 overflow-hidden p-4">
+    <main class="flex-1 overflow-hidden p-6 bg-gray-50">
       <div class="max-w-6xl mx-auto h-full flex flex-col">
         <div class="grid lg:grid-cols-3 gap-4 flex-1 min-h-0">
           <!-- 左侧：当前模型配置 -->
-          <Card v-if="currentConfig" class="p-4 lg:col-span-1 overflow-auto">
-            <h3 class="font-semibold mb-3 flex items-center gap-2">
-              <ListTree class="w-4 h-4 text-blue-600" />
+          <Card v-if="currentConfig" class="p-5 lg:col-span-1 overflow-auto">
+            <h3 class="font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <ListTree class="w-5 h-5 text-blue-600" />
               模型配置
             </h3>
 
             <div class="mb-4">
-              <p class="text-xs text-muted-foreground mb-1">主要模型</p>
+              <p class="text-xs text-gray-600 mb-2 font-medium">主要模型</p>
               <div class="relative primary-selector-container">
                 <Button variant="outline" size="sm" @click="showPrimarySelector = !showPrimarySelector"
-                        class="w-full h-auto min-h-8 py-1.5 text-left justify-between"
+                        class="w-full h-auto min-h-9 py-2 text-left justify-between"
                         :disabled="allAvailableModels.length === 0">
-                  <span v-if="modelSelection.primary" class="text-sm text-blue-700 dark:text-blue-300 truncate">
+                  <span v-if="modelSelection.primary" class="text-sm text-blue-700 truncate">
                     {{ modelSelection.primary }}
                   </span>
-                  <span v-else class="text-sm text-muted-foreground">选择主模型</span>
+                  <span v-else class="text-sm text-gray-500">选择主模型</span>
                   <ChevronDown class="w-4 h-4 flex-shrink-0" :class="{ 'rotate-180': showPrimarySelector }" />
                 </Button>
-                <div v-if="showPrimarySelector" class="absolute z-20 mt-1 w-full max-h-48 overflow-auto bg-white dark:bg-gray-800 border rounded-lg shadow-lg">
+                <div v-if="showPrimarySelector" class="absolute z-20 mt-1 w-full max-h-48 overflow-auto bg-white border border-gray-200 rounded-lg shadow-lg">
                   <div v-for="model in availableForPrimary" :key="model.path" @click="selectPrimaryModel(model.path)"
-                       class="px-3 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer text-sm border-b last:border-b-0">
-                    <div class="font-medium truncate">{{ model.label }}</div>
-                    <div class="text-xs text-muted-foreground truncate">{{ model.path }}</div>
+                       class="px-3 py-2 hover:bg-gray-50 cursor-pointer text-sm border-b last:border-b-0">
+                    <div class="font-medium truncate text-gray-900">{{ model.label }}</div>
+                    <div class="text-xs text-gray-500 truncate">{{ model.path }}</div>
                   </div>
-                  <p v-if="availableForPrimary.length === 0" class="px-3 py-2 text-xs text-muted-foreground">
+                  <p v-if="availableForPrimary.length === 0" class="px-3 py-2 text-xs text-gray-500">
                     没有可选模型
                   </p>
                 </div>
@@ -948,10 +948,10 @@ const loadRemoteDefaultConfig = async () => {
             </div>
 
             <div>
-              <p class="text-xs text-muted-foreground mb-2">备用模型</p>
+              <p class="text-xs text-gray-600 mb-2 font-medium">备用模型</p>
               <div class="space-y-1">
                 <div v-for="fb in modelSelection.fallbacks" :key="fb" class="flex items-center gap-1 group">
-                  <code class="text-xs bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-300 px-2 py-1 rounded flex-1 truncate">
+                  <code class="text-xs bg-amber-50 text-amber-700 px-2 py-1 rounded flex-1 truncate">
                     {{ fb }}
                   </code>
                   <Button variant="ghost" size="sm" @click="removeFallbackModel(fb)"
@@ -966,22 +966,22 @@ const loadRemoteDefaultConfig = async () => {
                     添加备用
                     <ChevronDown class="w-3 h-3 ml-auto" :class="{ 'rotate-180': showFallbackSelector }" />
                   </Button>
-                  <div v-if="showFallbackSelector" class="absolute z-20 mt-1 w-full max-h-48 overflow-auto bg-white dark:bg-gray-800 border rounded-lg shadow-lg">
+                  <div v-if="showFallbackSelector" class="absolute z-20 mt-1 w-full max-h-48 overflow-auto bg-white border border-gray-200 rounded-lg shadow-lg">
                     <div v-for="model in availableForFallback" :key="model.path" @click="addFallbackModel(model.path)"
-                         class="px-3 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer text-sm border-b last:border-b-0">
-                      <div class="font-medium truncate">{{ model.label }}</div>
-                      <div class="text-xs text-muted-foreground truncate">{{ model.path }}</div>
+                         class="px-3 py-2 hover:bg-gray-50 cursor-pointer text-sm border-b last:border-b-0">
+                      <div class="font-medium truncate text-gray-900">{{ model.label }}</div>
+                      <div class="text-xs text-gray-500 truncate">{{ model.path }}</div>
                     </div>
                   </div>
                 </div>
-                <p v-else-if="modelSelection.fallbacks.length === 0" class="text-xs text-muted-foreground">
+                <p v-else-if="modelSelection.fallbacks.length === 0" class="text-xs text-gray-500">
                   请先添加模型
                 </p>
               </div>
             </div>
 
-            <div class="mt-4 pt-4 border-t">
-              <p class="text-xs text-muted-foreground mb-2 flex items-center gap-1">
+            <div class="mt-4 pt-4 border-t border-gray-200">
+              <p class="text-xs text-gray-600 mb-2 flex items-center gap-1 font-medium">
                 <Wrench class="w-3 h-3" />
                 工具
               </p>
@@ -1006,12 +1006,12 @@ const loadRemoteDefaultConfig = async () => {
           </Card>
 
           <!-- 右侧：提供商列表 -->
-          <Card class="p-4 lg:col-span-2 flex flex-col overflow-hidden">
-            <div class="flex items-center justify-between mb-3">
-              <h3 class="font-semibold flex items-center gap-2">
-                <Server class="w-4 h-4" />
+          <Card class="p-5 lg:col-span-2 flex flex-col overflow-hidden">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="font-semibold text-gray-900 flex items-center gap-2">
+                <Server class="w-5 h-5" />
                 服务商
-                <span class="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 text-xs rounded">{{ providers.length }}</span>
+                <span class="px-2 py-0.5 bg-gray-100 text-xs rounded font-medium">{{ providers.length }}</span>
               </h3>
               <Button variant="default" size="sm" @click="openProviderModal" :disabled="!currentConfig">
                 <Plus class="w-4 h-4" />
@@ -1019,7 +1019,7 @@ const loadRemoteDefaultConfig = async () => {
               </Button>
             </div>
 
-            <div v-if="providers.length === 0" class="text-center py-8 text-muted-foreground">
+            <div v-if="providers.length === 0" class="text-center py-8 text-gray-500">
               <Server class="w-10 h-10 mx-auto mb-2 opacity-20" />
               <p class="text-sm">{{ currentConfig ? '点击添加按钮创建' : '请先加载配置文件' }}</p>
             </div>
@@ -1045,40 +1045,40 @@ const loadRemoteDefaultConfig = async () => {
 
     <!-- 添加提供商弹窗 -->
     <div v-if="showProviderModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" @click.self="showProviderModal = false">
-      <Card class="w-full max-w-md p-6 m-4">
-        <h3 class="font-semibold text-lg mb-4">{{ isEditingProvider ? '编辑服务商' : '添加服务商' }}</h3>
+      <Card class="w-full max-w-md p-6 m-4 bg-white">
+        <h3 class="font-semibold text-lg text-gray-900 mb-4">{{ isEditingProvider ? '编辑服务商' : '添加服务商' }}</h3>
 
-        <div v-if="!isEditingProvider" class="flex rounded-lg bg-gray-100 dark:bg-gray-800 p-1 mb-4">
+        <div v-if="!isEditingProvider" class="flex rounded-lg bg-gray-100 p-1 mb-4">
           <button @click="providerModalTab = 'manual'"
-            class="flex-1 px-3 py-1.5 text-sm rounded-md transition-colors"
-            :class="providerModalTab === 'manual' ? 'bg-white dark:bg-gray-700 shadow-sm font-medium' : 'text-muted-foreground hover:text-foreground'">
+            class="flex-1 px-3 py-2 text-sm rounded-md transition-colors"
+            :class="providerModalTab === 'manual' ? 'bg-white shadow-sm font-medium text-gray-900' : 'text-gray-600 hover:text-gray-900'">
             手动配置
           </button>
           <button @click="providerModalTab = 'paste'"
-            class="flex-1 px-3 py-1.5 text-sm rounded-md transition-colors"
-            :class="providerModalTab === 'paste' ? 'bg-white dark:bg-gray-700 shadow-sm font-medium' : 'text-muted-foreground hover:text-foreground'">
+            class="flex-1 px-3 py-2 text-sm rounded-md transition-colors"
+            :class="providerModalTab === 'paste' ? 'bg-white shadow-sm font-medium text-gray-900' : 'text-gray-600 hover:text-gray-900'">
             粘贴配置
           </button>
         </div>
 
         <div v-if="providerModalTab === 'manual' || isEditingProvider" class="space-y-4">
           <div>
-            <Label class="text-sm mb-1 block">服务商名称 *</Label>
+            <Label class="text-sm mb-1.5 block text-gray-700">服务商名称 *</Label>
             <Input v-model="newProvider.name" placeholder="例如: openai" :disabled="loading || isEditingProvider" />
           </div>
           <div>
-            <Label class="text-sm mb-1 block">Base URL *</Label>
+            <Label class="text-sm mb-1.5 block text-gray-700">Base URL *</Label>
             <Input v-model="newProvider.baseUrl" placeholder="https://api.openai.com/v1" :disabled="loading" />
           </div>
           <div>
-            <Label class="text-sm mb-1 block">API Key <span class="text-muted-foreground">(可选)</span></Label>
+            <Label class="text-sm mb-1.5 block text-gray-700">API Key <span class="text-gray-500">(可选)</span></Label>
             <Input v-model="newProvider.apiKey" type="password" placeholder="sk-..." :disabled="loading" />
           </div>
 
           <div class="flex flex-wrap items-center gap-2">
-            <span class="text-xs text-muted-foreground">快速选择:</span>
+            <span class="text-xs text-gray-600">快速选择:</span>
             <button v-for="preset in chineseProviderPresets" :key="preset.name" @click="fillPreset(preset)"
-              class="px-2 py-1 text-xs rounded-md bg-blue-50 text-blue-700 hover:bg-blue-100 dark:bg-blue-900 dark:text-blue-200 transition-colors">
+              class="px-2 py-1 text-xs rounded-md bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors">
               {{ preset.displayName }}
             </button>
           </div>
@@ -1086,23 +1086,23 @@ const loadRemoteDefaultConfig = async () => {
 
         <div v-if="providerModalTab === 'paste' && !isEditingProvider" class="space-y-3">
           <div>
-            <Label class="text-sm mb-1 block">服务商名称 *</Label>
+            <Label class="text-sm mb-1.5 block text-gray-700">服务商名称 *</Label>
             <Input v-model="pasteProviderName" placeholder="例如: bailian" :disabled="loading" />
           </div>
           <div>
-            <Label class="text-sm mb-1 block">JSON 配置 *</Label>
+            <Label class="text-sm mb-1.5 block text-gray-700">JSON 配置 *</Label>
             <textarea v-model="pasteJsonText"
               placeholder="粘贴服务商提供的 JSON 配置，支持包含 providers 的完整配置或单个服务商配置"
               :disabled="loading" rows="8"
-              class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 resize-none font-mono"
+              class="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm ring-offset-background placeholder:text-gray-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 resize-none font-mono"
             />
             <p v-if="pasteParseError" class="text-xs text-red-500 mt-1">{{ pasteParseError }}</p>
-            <p v-else-if="parsedProviderConfig" class="text-xs text-green-600 dark:text-green-400 mt-1">
+            <p v-else-if="parsedProviderConfig" class="text-xs text-green-600 mt-1">
               ✓ 解析成功，包含 {{ parsedProviderConfig.models?.length || 0 }} 个模型
             </p>
           </div>
           <div>
-            <Label class="text-sm mb-1 block">API Key *</Label>
+            <Label class="text-sm mb-1.5 block text-gray-700">API Key *</Label>
             <Input v-model="pasteApiKey" type="password" placeholder="sk-..." :disabled="loading" />
           </div>
         </div>
@@ -1119,25 +1119,25 @@ const loadRemoteDefaultConfig = async () => {
 
     <!-- 添加模型弹窗 -->
     <div v-if="showModelModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" @click.self="showModelModal = false">
-      <Card class="w-full max-w-sm p-6 m-4">
-        <h3 class="font-semibold text-lg mb-4">添加模型到 {{ modelModalProvider }}</h3>
+      <Card class="w-full max-w-sm p-6 m-4 bg-white">
+        <h3 class="font-semibold text-lg text-gray-900 mb-4">添加模型到 {{ modelModalProvider }}</h3>
         <div class="space-y-4">
           <div>
-            <Label class="text-sm mb-1 block">模型 ID *</Label>
+            <Label class="text-sm mb-1.5 block text-gray-700">模型 ID *</Label>
             <div class="relative model-dropdown-container">
               <Input :value="newModelId" @input="newModelId = ($event.target as HTMLInputElement).value"
                 @focus="handleDropdownOpen" placeholder="搜索模型或手动输入" @keyup.enter="addModelFromModal"
                 autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" lang="en" />
               <div v-if="showModelDropdown && (availableModels.length > 0 || loadingModels)"
-                class="absolute inset-x-0 top-full mt-1 max-h-48 overflow-auto bg-white dark:bg-gray-800 border rounded-lg shadow-lg z-10"
+                class="absolute inset-x-0 top-full mt-1 max-h-48 overflow-auto bg-white border border-gray-200 rounded-lg shadow-lg z-10"
                 @click.stop>
-                <div v-if="loadingModels" class="px-3 py-2 text-xs text-muted-foreground">加载中...</div>
+                <div v-if="loadingModels" class="px-3 py-2 text-xs text-gray-500">加载中...</div>
                 <template v-else>
                   <div v-for="model in filteredModels" :key="model" @click="selectModelFromDropdown(model)"
-                    class="px-3 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer text-sm border-b last:border-b-0">
+                    class="px-3 py-2 hover:bg-gray-50 cursor-pointer text-sm border-b last:border-b-0 text-gray-900">
                     {{ model }}
                   </div>
-                  <p v-if="filteredModels.length === 0" class="px-3 py-2 text-xs text-muted-foreground">无匹配结果</p>
+                  <p v-if="filteredModels.length === 0" class="px-3 py-2 text-xs text-gray-500">无匹配结果</p>
                 </template>
               </div>
             </div>
@@ -1155,21 +1155,21 @@ const loadRemoteDefaultConfig = async () => {
 
     <!-- 源文件查看弹窗 -->
     <div v-if="showSourceModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" @click.self="showSourceModal = false">
-      <Card class="w-full max-w-4xl max-h-[85vh] m-4 flex flex-col">
-        <div class="flex items-center justify-between p-4 border-b">
-          <h3 class="font-semibold text-lg flex items-center gap-2">
+      <Card class="w-full max-w-4xl max-h-[85vh] m-4 flex flex-col bg-white">
+        <div class="flex items-center justify-between p-5 border-b border-gray-200">
+          <h3 class="font-semibold text-lg text-gray-900 flex items-center gap-2">
             <FileCode class="w-5 h-5" />
             源文件内容
           </h3>
           <div class="flex items-center gap-2">
-            <span v-if="fileInfo" class="text-xs text-muted-foreground truncate max-w-md">{{ fileInfo.path }}</span>
+            <span v-if="fileInfo" class="text-xs text-gray-600 truncate max-w-md">{{ fileInfo.path }}</span>
             <Button variant="ghost" size="sm" @click="showSourceModal = false" class="h-8 w-8 p-0">
               <X class="w-4 h-4" />
             </Button>
           </div>
         </div>
-        <div class="flex-1 overflow-auto p-4">
-          <pre class="text-xs bg-gray-50 dark:bg-gray-900 p-4 rounded-lg overflow-x-auto">{{ JSON.stringify(currentConfig, null, 2) }}</pre>
+        <div class="flex-1 overflow-auto p-5">
+          <pre class="text-xs bg-gray-50 p-4 rounded-lg overflow-x-auto text-gray-900">{{ JSON.stringify(currentConfig, null, 2) }}</pre>
         </div>
       </Card>
     </div>
