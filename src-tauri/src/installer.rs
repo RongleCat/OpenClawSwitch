@@ -75,6 +75,27 @@ pub struct EnvironmentStatus {
     pub network_region: String,
 }
 
+/// 下载进度事件
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallDownloadEvent {
+    pub step: String,
+    pub percent: u8,
+    pub speed: String,
+    pub downloaded: u64,
+    pub total: u64,
+}
+
+/// 步骤耗时事件
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallStepTimingEvent {
+    pub step: String,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub duration: u64,
+}
+
 // ============================================================================
 // 镜像源配置
 // ============================================================================
@@ -91,8 +112,16 @@ const NPM_REGISTRIES: &[&str] = &[
     "https://registry.npmjs.org",
 ];
 
-const FNM_GITHUB_RELEASE: &str = "https://github.com/Schniz/fnm/releases/latest/download";
-const FNM_MIRROR_PREFIX: &str = "https://ghproxy.com/";
+// GitHub 镜像源（多源容错）
+const FNM_MIRRORS: &[&str] = &[
+    "https://kkgithub.com/Schniz/fnm/releases/latest/download",
+    "https://ghfast.top/https://github.com/Schniz/fnm/releases/latest/download",
+    "https://ghproxy.com/https://github.com/Schniz/fnm/releases/latest/download",
+    "https://github.com/Schniz/fnm/releases/latest/download", // 直连作为最后备选
+];
+
+// 下载超时（秒）
+const DOWNLOAD_TIMEOUT_SECS: u64 = 30;
 
 // ============================================================================
 // 辅助函数
@@ -132,6 +161,33 @@ fn emit_progress(app: &AppHandle, current: u8, total: u8, name: &str, status: &s
     );
 }
 
+/// 发送下载进度事件
+fn emit_download(app: &AppHandle, step: &str, percent: u8, speed: &str, downloaded: u64, total: u64) {
+    let _ = app.emit_all(
+        "install-download",
+        InstallDownloadEvent {
+            step: step.to_string(),
+            percent,
+            speed: speed.to_string(),
+            downloaded,
+            total,
+        },
+    );
+}
+
+/// 发送步骤耗时事件
+fn emit_timing(app: &AppHandle, step: &str, start: u64, end: u64) {
+    let _ = app.emit_all(
+        "install-step-timing",
+        InstallStepTimingEvent {
+            step: step.to_string(),
+            start_time: start,
+            end_time: end,
+            duration: end - start,
+        },
+    );
+}
+
 /// 执行命令并返回 stdout（跨平台）
 fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
     let output = if cfg!(target_os = "windows") {
@@ -166,11 +222,22 @@ fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
 /// 执行 shell 命令（用于复杂命令）
 fn run_shell(cmd: &str) -> Result<String, String> {
     let output = if cfg!(target_os = "windows") {
-        Command::new("cmd")
-            .args(["/c", cmd])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
+        // Windows: 优先使用 PowerShell（更好的 UTF-8 支持和环境变量处理）
+        if cmd.starts_with("powershell") {
+            // 已经是 PowerShell 命令，直接执行
+            Command::new("cmd")
+                .args(["/c", cmd])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+        } else {
+            // 普通命令，用 cmd 执行
+            Command::new("cmd")
+                .args(["/c", cmd])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+        }
     } else {
         Command::new("sh")
             .args(["-c", cmd])
@@ -198,11 +265,20 @@ fn run_shell_with_log(app: &AppHandle, step: &str, cmd: &str) -> Result<String, 
     emit_log(app, step, &format!("$ {}", cmd), "info");
 
     let mut child = if cfg!(target_os = "windows") {
-        Command::new("cmd")
-            .args(["/c", cmd])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+        if cmd.starts_with("powershell") {
+            // PowerShell 命令
+            Command::new("cmd")
+                .args(["/c", cmd])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+        } else {
+            Command::new("cmd")
+                .args(["/c", cmd])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+        }
     } else {
         Command::new("sh")
             .args(["-c", cmd])
@@ -253,16 +329,140 @@ fn run_shell_with_log(app: &AppHandle, step: &str, cmd: &str) -> Result<String, 
 /// 构建包含 fnm 环境的 shell 命令
 fn with_fnm_env(cmd: &str) -> String {
     if cfg!(target_os = "windows") {
-        // Windows: fnm env --use-on-cd 输出 PowerShell 格式，用 cmd 需要特殊处理
+        // Windows: 使用 PowerShell 执行 fnm 相关命令
+        let fnm_dir = "$env:USERPROFILE\\.fnm";
         format!(
-            "set \"FNM_DIR=%USERPROFILE%\\.fnm\" && set \"PATH=%USERPROFILE%\\.fnm;%PATH%\" && {}",
-            cmd
+            "powershell -NoProfile -Command \"$env:FNM_DIR='{}'; $env:PATH='{}' + ';' + $env:PATH; & fnm env --use-on-cd | Invoke-Expression; {}\"",
+            fnm_dir, fnm_dir, cmd
         )
     } else {
         format!(
             "export FNM_DIR=\"$HOME/.fnm\" && export PATH=\"$HOME/.fnm:$PATH\" && eval \"$(fnm env)\" && {}",
             cmd
         )
+    }
+}
+
+/// 带进度监控的下载函数（支持多镜像源自动切换）
+async fn download_with_progress(
+    app: &AppHandle,
+    step: &str,
+    urls: &[&str],
+    description: &str,
+) -> Result<bytes::Bytes, String> {
+    emit_log(app, step, &format!("下载 {}", description), "info");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(DOWNLOAD_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+
+    let mut last_error = String::new();
+
+    for (idx, url) in urls.iter().enumerate() {
+        emit_log(
+            app,
+            step,
+            &format!("尝试镜像源 {}/{}: {}", idx + 1, urls.len(), url),
+            "info",
+        );
+
+        match download_from_url(&client, app, step, url).await {
+            Ok(data) => {
+                emit_log(app, step, &format!("下载完成: {}", description), "success");
+                return Ok(data);
+            }
+            Err(e) => {
+                last_error = e.clone();
+                emit_log(
+                    app,
+                    step,
+                    &format!("镜像源 {} 下载失败: {}", idx + 1, e),
+                    "warn",
+                );
+            }
+        }
+    }
+
+    Err(format!("所有镜像源均下载失败，最后错误: {}", last_error))
+}
+
+/// 从单个 URL 下载（带进度）
+async fn download_from_url(
+    client: &reqwest::Client,
+    app: &AppHandle,
+    step: &str,
+    url: &str,
+) -> Result<bytes::Bytes, String> {
+    use std::time::Instant;
+
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+
+    let total_size = response.content_length().unwrap_or(0);
+    let mut downloaded: u64 = 0;
+    let mut buffer = Vec::new();
+    let start_time = Instant::now();
+    let mut last_emit_time = Instant::now();
+
+    let mut stream = response.bytes_stream();
+    use futures_util::StreamExt;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("读取数据失败: {}", e))?;
+        downloaded += chunk.len() as u64;
+        buffer.extend_from_slice(&chunk);
+
+        // 每 200ms 更新一次进度
+        if last_emit_time.elapsed().as_millis() >= 200 {
+            let elapsed = start_time.elapsed().as_secs_f64();
+            let speed = if elapsed > 0.0 {
+                downloaded as f64 / elapsed
+            } else {
+                0.0
+            };
+
+            let speed_str = format_speed(speed);
+            let percent = if total_size > 0 {
+                ((downloaded as f64 / total_size as f64) * 100.0) as u8
+            } else {
+                0
+            };
+
+            emit_download(app, step, percent, &speed_str, downloaded, total_size);
+            last_emit_time = Instant::now();
+        }
+    }
+
+    // 最后发送 100% 进度
+    if total_size > 0 {
+        let elapsed = start_time.elapsed().as_secs_f64();
+        let speed = if elapsed > 0.0 {
+            downloaded as f64 / elapsed
+        } else {
+            0.0
+        };
+        emit_download(app, step, 100, &format_speed(speed), downloaded, total_size);
+    }
+
+    Ok(bytes::Bytes::from(buffer))
+}
+
+/// 格式化速度（字节/秒 → 人类可读）
+fn format_speed(bytes_per_sec: f64) -> String {
+    if bytes_per_sec >= 1_048_576.0 {
+        format!("{:.1} MB/s", bytes_per_sec / 1_048_576.0)
+    } else if bytes_per_sec >= 1024.0 {
+        format!("{:.1} KB/s", bytes_per_sec / 1024.0)
+    } else {
+        format!("{:.0} B/s", bytes_per_sec)
     }
 }
 
@@ -461,8 +661,8 @@ pub async fn check_environment() -> EnvironmentStatus {
 // Tauri 命令 - 安装操作
 // ============================================================================
 
-/// 获取 fnm 下载 URL
-fn get_fnm_download_url(use_mirror: bool) -> String {
+/// 获取 fnm 下载 URL 列表（多镜像源）
+fn get_fnm_download_urls() -> Vec<String> {
     let platform = if cfg!(target_os = "windows") {
         "fnm-windows"
     } else if cfg!(target_os = "macos") {
@@ -480,18 +680,17 @@ fn get_fnm_download_url(use_mirror: bool) -> String {
         }
     };
 
-    let base_url = format!("{}/{}.zip", FNM_GITHUB_RELEASE, platform);
-    if use_mirror {
-        format!("{}{}", FNM_MIRROR_PREFIX, base_url)
-    } else {
-        base_url
-    }
+    FNM_MIRRORS
+        .iter()
+        .map(|mirror| format!("{}/{}.zip", mirror, platform))
+        .collect()
 }
 
 /// 安装 fnm
 #[tauri::command]
-pub async fn install_fnm(app: AppHandle, use_mirror: bool) -> Result<String, String> {
+pub async fn install_fnm(app: AppHandle, _use_mirror: bool) -> Result<String, String> {
     let step = "install_fnm";
+    let start_time = now_ms();
     emit_log(&app, step, "开始安装 fnm (Fast Node Manager)...", "info");
 
     let home = dirs::home_dir().ok_or("无法获取用户主目录")?;
@@ -501,53 +700,21 @@ pub async fn install_fnm(app: AppHandle, use_mirror: bool) -> Result<String, Str
     std::fs::create_dir_all(&fnm_dir)
         .map_err(|e| format!("创建 fnm 目录失败: {}", e))?;
 
-    // 下载 fnm
-    let url = get_fnm_download_url(use_mirror);
-    emit_log(&app, step, &format!("下载 fnm: {}", url), "info");
+    // 获取下载 URL 列表
+    let urls = get_fnm_download_urls();
+    let url_refs: Vec<&str> = urls.iter().map(|s| s.as_str()).collect();
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+    // 使用新的下载函数（带进度）
+    let bytes = download_with_progress(&app, step, &url_refs, "fnm").await?;
 
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| {
-            let msg = format!("下载 fnm 失败: {}", e);
-            emit_log(&app, step, &msg, "error");
-            msg
-        })?;
-
-    if !response.status().is_success() {
-        // 如果镜像失败，尝试直连
-        if use_mirror {
-            emit_log(&app, step, "镜像下载失败，尝试直连 GitHub...", "warn");
-            let direct_url = get_fnm_download_url(false);
-            let response = client
-                .get(&direct_url)
-                .send()
-                .await
-                .map_err(|e| format!("直连下载也失败: {}", e))?;
-
-            if !response.status().is_success() {
-                return Err("fnm 下载失败，请检查网络连接".to_string());
-            }
-
-            let bytes = response.bytes().await.map_err(|e| format!("读取数据失败: {}", e))?;
-            extract_fnm_zip(&app, step, &bytes, &fnm_dir)?;
-        } else {
-            return Err(format!("下载失败: HTTP {}", response.status()));
-        }
-    } else {
-        let bytes = response.bytes().await.map_err(|e| format!("读取数据失败: {}", e))?;
-        extract_fnm_zip(&app, step, &bytes, &fnm_dir)?;
-    }
+    // 解压
+    extract_fnm_zip(&app, step, &bytes, &fnm_dir)?;
 
     // 配置 PATH（添加到 shell 配置文件）
     configure_fnm_path(&app, step)?;
 
+    let end_time = now_ms();
+    emit_timing(&app, step, start_time, end_time);
     emit_log(&app, step, "fnm 安装完成!", "success");
     Ok("fnm 安装成功".to_string())
 }
@@ -755,7 +922,7 @@ pub async fn install_openclaw(
         );
 
         let cmd = with_fnm_env(&format!(
-            "npm install -g openclaw --registry={}",
+            "npm install -g openclaw@latest --registry={}",
             registry
         ));
 
@@ -855,7 +1022,7 @@ pub async fn install_git(app: AppHandle) -> Result<String, String> {
 /// 执行完整安装流程
 #[tauri::command]
 pub async fn run_full_install(app: AppHandle) -> Result<String, String> {
-    let total_steps: u8 = 6;
+    let total_steps: u8 = 5;
 
     // 步骤 1: 环境检测
     emit_progress(&app, 1, total_steps, "环境检测", "running");
@@ -921,46 +1088,48 @@ pub async fn run_full_install(app: AppHandle) -> Result<String, String> {
         emit_progress(&app, 2, total_steps, "安装 Git", "success");
     }
 
-    // 步骤 3: 安装 fnm（如需）
-    emit_progress(&app, 3, total_steps, "安装 fnm", "running");
-    if !env.fnm.installed {
-        install_fnm(app.clone(), use_china).await.map_err(|e| {
-            emit_progress(&app, 3, total_steps, "安装 fnm", "error");
-            e
-        })?;
-    } else {
-        emit_log(&app, "install_fnm", "fnm 已安装，跳过", "success");
-    }
-    emit_progress(&app, 3, total_steps, "安装 fnm", "success");
+    // 步骤 3: 安装 Node.js（包含 fnm）
+    emit_progress(&app, 3, total_steps, "安装 Node.js", "running");
 
-    // 步骤 4: 安装 Node.js（如需）
-    emit_progress(&app, 4, total_steps, "安装 Node.js", "running");
-    if !env.node.meets_requirement {
+    // 如果 Node.js >= 22 已安装，完全跳过此步骤
+    if env.node.meets_requirement {
+        emit_log(&app, "install_node", "Node.js >= 22 已安装，跳过 fnm 和 Node.js 安装", "success");
+        emit_progress(&app, 3, total_steps, "安装 Node.js", "success");
+    } else {
+        // 先安装 fnm（如需）
+        if !env.fnm.installed {
+            install_fnm(app.clone(), use_china).await.map_err(|e| {
+                emit_progress(&app, 3, total_steps, "安装 Node.js", "error");
+                e
+            })?;
+        } else {
+            emit_log(&app, "install_fnm", "fnm 已安装，跳过", "success");
+        }
+
+        // 再安装 Node.js
         install_node_via_fnm(app.clone(), "22".to_string(), use_china)
             .await
             .map_err(|e| {
-                emit_progress(&app, 4, total_steps, "安装 Node.js", "error");
+                emit_progress(&app, 3, total_steps, "安装 Node.js", "error");
                 e
             })?;
-    } else {
-        emit_log(&app, "install_node", "Node.js >= 22 已安装，跳过", "success");
+        emit_progress(&app, 3, total_steps, "安装 Node.js", "success");
     }
-    emit_progress(&app, 4, total_steps, "安装 Node.js", "success");
 
-    // 步骤 5: 安装 OpenClaw
-    emit_progress(&app, 5, total_steps, "安装 OpenClaw", "running");
+    // 步骤 4: 安装 OpenClaw
+    emit_progress(&app, 4, total_steps, "安装 OpenClaw", "running");
     if !env.openclaw.installed {
         install_openclaw(app.clone(), use_china).await.map_err(|e| {
-            emit_progress(&app, 5, total_steps, "安装 OpenClaw", "error");
+            emit_progress(&app, 4, total_steps, "安装 OpenClaw", "error");
             e
         })?;
     } else {
         emit_log(&app, "install_openclaw", "OpenClaw 已安装，跳过", "success");
     }
-    emit_progress(&app, 5, total_steps, "安装 OpenClaw", "success");
+    emit_progress(&app, 4, total_steps, "安装 OpenClaw", "success");
 
-    // 步骤 6: 验证安装
-    emit_progress(&app, 6, total_steps, "验证安装", "running");
+    // 步骤 5: 验证安装
+    emit_progress(&app, 5, total_steps, "验证安装", "running");
     emit_log(&app, "verify", "验证安装结果...", "info");
 
     let final_status = check_openclaw_installed();
@@ -974,7 +1143,7 @@ pub async fn run_full_install(app: AppHandle) -> Result<String, String> {
             ),
             "success",
         );
-        emit_progress(&app, 6, total_steps, "验证安装", "success");
+        emit_progress(&app, 5, total_steps, "验证安装", "success");
         Ok("安装完成".to_string())
     } else {
         emit_log(&app, "verify", "验证失败: openclaw 命令不可用", "error");
@@ -984,7 +1153,219 @@ pub async fn run_full_install(app: AppHandle) -> Result<String, String> {
             "请尝试重启终端后再次检测，或手动执行: openclaw --version",
             "warn",
         );
-        emit_progress(&app, 6, total_steps, "验证安装", "error");
+        emit_progress(&app, 5, total_steps, "验证安装", "error");
         Err("安装验证失败，请重启终端后重试".to_string())
     }
 }
+
+// ============================================================================
+// Tauri 命令 - 安装后配置
+// ============================================================================
+
+/// 打开终端并执行命令（跨平台）
+#[tauri::command]
+pub async fn open_terminal_with_command(command: String) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        // macOS: 使用 osascript 打开 Terminal.app 并执行命令
+        let script = format!(
+            "tell application \"Terminal\"\n\
+             activate\n\
+             do script \"{}\"\n\
+             end tell",
+            command.replace("\"", "\\\"")
+        );
+
+        Command::new("osascript")
+            .args(["-e", &script])
+            .spawn()
+            .map_err(|e| format!("打开终端失败: {}", e))?;
+
+        Ok("已打开终端".to_string())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows: 使用 start 打开 cmd 并执行命令
+        Command::new("cmd")
+            .args(["/c", "start", "cmd", "/k", &command])
+            .spawn()
+            .map_err(|e| format!("打开终端失败: {}", e))?;
+
+        Ok("已打开终端".to_string())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Linux: 尝试多种终端模拟器
+        let terminals = [
+            ("gnome-terminal", vec!["--", "bash", "-c", &command]),
+            ("konsole", vec!["-e", "bash", "-c", &command]),
+            ("xterm", vec!["-e", "bash", "-c", &command]),
+            ("x-terminal-emulator", vec!["-e", "bash", "-c", &command]),
+        ];
+
+        for (term, args) in &terminals {
+            if Command::new("which").arg(term).output().is_ok() {
+                Command::new(term)
+                    .args(args)
+                    .spawn()
+                    .map_err(|e| format!("打开终端失败: {}", e))?;
+                return Ok("已打开终端".to_string());
+            }
+        }
+
+        Err("未找到可用的终端模拟器".to_string())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        Err("不支持的操作系统".to_string())
+    }
+}
+
+/// 生成默认配置文件
+#[tauri::command]
+pub async fn generate_default_config(app: AppHandle) -> Result<String, String> {
+    let step = "generate_config";
+    emit_log(&app, step, "生成默认配置文件...", "info");
+
+    let home = dirs::home_dir().ok_or("无法获取用户主目录")?;
+    let config_dir = home.join(".openclaw");
+    let config_path = config_dir.join("openclaw.json");
+
+    // 创建配置目录
+    std::fs::create_dir_all(&config_dir)
+        .map_err(|e| format!("创建配置目录失败: {}", e))?;
+
+    // 生成随机 token
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let token = format!("openclaw-{:x}", timestamp);
+
+    // 默认配置（最精简可启动）
+    let default_config = serde_json::json!({
+        "gateway": {
+            "mode": "local",
+            "port": 18789,
+            "bind": "loopback"
+        },
+        "agents": {
+            "defaults": {
+                "workspace": "~/.openclaw/workspace",
+                "model": {
+                    "primary": "local/placeholder"
+                }
+            },
+            "list": [
+                {
+                    "id": "main",
+                    "default": true
+                }
+            ]
+        },
+        "hooks": {
+            "enabled": true,
+            "token": token,
+            "path": "/hooks",
+            "maxBodyBytes": 262144,
+            "defaultSessionKey": "hook:ingress",
+            "allowRequestSessionKey": false,
+            "allowedSessionKeyPrefixes": ["hook:"],
+            "allowedAgentIds": ["hooks", "main"]
+        }
+    });
+
+    // 写入配置文件
+    let config_str = serde_json::to_string_pretty(&default_config)
+        .map_err(|e| format!("序列化配置失败: {}", e))?;
+
+    std::fs::write(&config_path, config_str)
+        .map_err(|e| format!("写入配置文件失败: {}", e))?;
+
+    emit_log(
+        &app,
+        step,
+        &format!("配置文件已生成: {}", config_path.display()),
+        "success",
+    );
+
+    Ok(format!("配置文件已生成: {}", config_path.display()))
+}
+
+/// 安装网关服务（后台自动启动）
+#[tauri::command]
+pub async fn install_gateway_service(app: AppHandle) -> Result<String, String> {
+    let step = "install_service";
+    emit_log(&app, step, "安装网关服务...", "info");
+
+    // 执行 openclaw gateway install
+    let cmd = with_fnm_env("openclaw gateway install");
+
+    match run_shell_with_log(&app, step, &cmd) {
+        Ok(_) => {
+            emit_log(&app, step, "网关服务安装成功!", "success");
+            Ok("网关服务已安装".to_string())
+        }
+        Err(e) => {
+            emit_log(&app, step, &format!("网关服务安装失败: {}", e), "error");
+            Err(format!("网关服务安装失败: {}", e))
+        }
+    }
+}
+
+/// 打开 Web UI
+#[tauri::command]
+pub async fn open_web_ui() -> Result<String, String> {
+    let url = "http://127.0.0.1:18789/";
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| format!("打开浏览器失败: {}", e))?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/c", "start", url])
+            .spawn()
+            .map_err(|e| format!("打开浏览器失败: {}", e))?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| format!("打开浏览器失败: {}", e))?;
+    }
+
+    Ok("已打开 Web UI".to_string())
+}
+
+/// 执行 openclaw doctor --fix
+#[tauri::command]
+pub async fn run_doctor_fix(app: AppHandle) -> Result<String, String> {
+    let step = "doctor_fix";
+    emit_log(&app, step, "开始诊断并修复...", "info");
+
+    let cmd = with_fnm_env("openclaw doctor --fix");
+
+    match run_shell_with_log(&app, step, &cmd) {
+        Ok(output) => {
+            emit_log(&app, step, "诊断修复完成!", "success");
+            Ok(output)
+        }
+        Err(e) => {
+            emit_log(&app, step, &format!("诊断修复失败: {}", e), "error");
+            Err(format!("诊断修复失败: {}", e))
+        }
+    }
+}
+

@@ -857,6 +857,12 @@ fn main() {
             installer::install_openclaw,
             installer::install_git,
             installer::run_full_install,
+            // 安装后配置
+            installer::open_terminal_with_command,
+            installer::generate_default_config,
+            installer::install_gateway_service,
+            installer::open_web_ui,
+            installer::run_doctor_fix,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

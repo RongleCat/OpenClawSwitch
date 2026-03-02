@@ -213,6 +213,23 @@ export interface InstallProgressEvent {
   status: 'running' | 'success' | 'error'
 }
 
+/** 下载进度事件 */
+export interface InstallDownloadEvent {
+  step: string
+  percent: number
+  speed: string
+  downloaded: number
+  total: number
+}
+
+/** 步骤耗时事件 */
+export interface InstallStepTimingEvent {
+  step: string
+  startTime: number
+  endTime: number
+  duration: number
+}
+
 // ============================================================================
 // 导航相关类型
 // ============================================================================
