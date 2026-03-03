@@ -44,3 +44,7 @@ nul
 # Temporary docs
 NEW_FEATURES_*.md
 TESTING_CHECKLIST.md
+docs/plans/
+
+# Test files (work in progress)
+tests/
