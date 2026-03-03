@@ -197,6 +197,16 @@ export interface EnvironmentStatus {
   networkRegion: string
 }
 
+/** V2 应用状态机输入快照 */
+export interface AppStateSnapshot {
+  envConnected: boolean
+  openclawInstalled: boolean
+  configLoaded: boolean
+  primaryModelValid: boolean
+  gatewayReachable: boolean
+  lastActionFailed: boolean
+}
+
 /** 安装日志事件 */
 export interface InstallLogEvent {
   step: string

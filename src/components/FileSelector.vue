@@ -33,17 +33,16 @@ const modeIcon = computed(() => {
 })
 
 const modeColor = computed(() => {
-  if (!props.fileInfo) return 'text-gray-500'
-  if (props.fileInfo.mode === 'ssh') return 'text-purple-600 dark:text-purple-400'
+  if (!props.fileInfo) return 'var(--oc-text-muted)'
+  if (props.fileInfo.mode === 'ssh') return 'var(--oc-accent)'
   return props.fileInfo.mode === 'local'
-    ? 'text-green-600 dark:text-green-400'
-    : 'text-blue-600 dark:text-blue-400'
+    ? 'var(--oc-success)'
+    : 'var(--oc-text-secondary)'
 })
 </script>
 
 <template>
   <div class="space-y-3">
-    <!-- 操作按钮 -->
     <div class="flex flex-wrap gap-2">
       <Button
         variant="outline"
@@ -77,22 +76,20 @@ const modeColor = computed(() => {
       </Button>
     </div>
 
-    <!-- 当前文件信息 -->
-    <div v-if="fileInfo" class="rounded-lg border bg-muted/50 p-3 space-y-2">
+    <div v-if="fileInfo" class="oc-card-soft p-3 space-y-2">
       <div class="flex items-center gap-2">
-        <component :is="modeIcon" class="w-4 h-4" :class="modeColor" />
-        <span class="text-sm font-medium" :class="modeColor">{{ modeLabel }}</span>
-        <span class="text-xs px-2 py-0.5 rounded-full bg-background border">
+        <component :is="modeIcon" class="w-4 h-4" :style="{ color: modeColor }" />
+        <span class="text-sm font-medium" :style="{ color: modeColor }">{{ modeLabel }}</span>
+        <span class="oc-tag">
           {{ fileInfo.fileName }}
         </span>
       </div>
-      <div class="text-xs text-muted-foreground truncate" :title="fileInfo.path">
+      <div class="text-xs truncate" style="color: var(--oc-text-muted);" :title="fileInfo.path">
         {{ fileInfo.path }}
       </div>
     </div>
 
-    <!-- 未加载状态 -->
-    <div v-else class="rounded-lg border border-dashed p-4 text-center text-muted-foreground">
+    <div v-else class="rounded-[12px] border border-dashed p-4 text-center" style="border-color: var(--oc-card-border); color: var(--oc-text-muted);">
       <FileJson class="w-8 h-8 mx-auto mb-2 opacity-50" />
       <p class="text-sm">请选择配置目录或文件</p>
       <p class="text-xs mt-1">支持 openclaw.json 和 clawdbot.json</p>

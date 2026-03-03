@@ -17,56 +17,58 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-[60]">
-    <Card class="w-full max-w-md p-6 m-4">
-      <!-- 标题 -->
+  <div class="oc-modal-overlay">
+    <Card class="oc-modal-card w-full max-w-md p-6">
       <div class="flex items-center gap-3 mb-4">
-        <div class="p-2 rounded-full" :class="fingerprint.isKnown
-          ? 'bg-green-100 dark:bg-green-900'
-          : 'bg-amber-100 dark:bg-amber-900'">
-          <ShieldCheck v-if="fingerprint.isKnown" class="w-6 h-6 text-green-600 dark:text-green-400" />
-          <ShieldAlert v-else class="w-6 h-6 text-amber-600 dark:text-amber-400" />
+        <div
+          class="rounded-full p-2"
+          :style="{
+            background: fingerprint.isKnown
+              ? 'color-mix(in srgb, var(--oc-success) 20%, transparent)'
+              : 'color-mix(in srgb, var(--oc-warning) 20%, transparent)'
+          }"
+        >
+          <ShieldCheck v-if="fingerprint.isKnown" class="w-6 h-6" style="color: var(--oc-success);" />
+          <ShieldAlert v-else class="w-6 h-6" style="color: var(--oc-warning);" />
         </div>
         <div>
-          <h3 class="font-semibold text-lg">
+          <h3 class="text-lg font-semibold" style="color: var(--oc-text-primary);">
             {{ fingerprint.isKnown ? '已知主机' : '未知主机' }}
           </h3>
-          <p class="text-sm text-muted-foreground">{{ fingerprint.host }}</p>
+          <p class="text-sm" style="color: var(--oc-text-muted);">{{ fingerprint.host }}</p>
         </div>
       </div>
 
-      <!-- 警告信息 -->
       <div v-if="!fingerprint.isKnown"
-           class="mb-4 p-3 rounded-lg bg-amber-50 dark:bg-amber-950 border border-amber-200 dark:border-amber-800">
-        <p class="text-sm text-amber-800 dark:text-amber-200">
+           class="mb-4 rounded-[11px] border p-3"
+           style="border-color: color-mix(in srgb, var(--oc-warning) 58%, transparent); background: color-mix(in srgb, var(--oc-warning) 12%, transparent); color: var(--oc-warning);">
+        <p class="text-sm">
           首次连接此服务器，请确认以下指纹信息是否正确。
           如果您不确定，请联系服务器管理员验证。
         </p>
       </div>
 
-      <!-- 指纹信息 -->
       <div class="space-y-3 mb-6">
         <div>
           <div class="flex items-center gap-1.5 mb-1">
-            <Fingerprint class="w-3.5 h-3.5 text-muted-foreground" />
-            <span class="text-xs font-medium text-muted-foreground">SHA-256</span>
+            <Fingerprint class="w-3.5 h-3.5" style="color: var(--oc-text-muted);" />
+            <span class="text-xs font-medium" style="color: var(--oc-text-muted);">SHA-256</span>
           </div>
-          <code class="block text-xs bg-gray-100 dark:bg-gray-800 p-2.5 rounded-lg font-mono break-all select-all">
+          <code class="block rounded-[10px] border p-2.5 font-mono text-xs break-all select-all" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated); color: var(--oc-text-primary);">
             {{ fingerprint.sha256 }}
           </code>
         </div>
         <div>
           <div class="flex items-center gap-1.5 mb-1">
-            <Fingerprint class="w-3.5 h-3.5 text-muted-foreground" />
-            <span class="text-xs font-medium text-muted-foreground">MD5</span>
+            <Fingerprint class="w-3.5 h-3.5" style="color: var(--oc-text-muted);" />
+            <span class="text-xs font-medium" style="color: var(--oc-text-muted);">MD5</span>
           </div>
-          <code class="block text-xs bg-gray-100 dark:bg-gray-800 p-2.5 rounded-lg font-mono break-all select-all">
+          <code class="block rounded-[10px] border p-2.5 font-mono text-xs break-all select-all" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated); color: var(--oc-text-primary);">
             {{ fingerprint.md5 }}
           </code>
         </div>
       </div>
 
-      <!-- 操作按钮 -->
       <div class="flex justify-end gap-2">
         <Button variant="ghost" @click="emit('reject')">
           拒绝

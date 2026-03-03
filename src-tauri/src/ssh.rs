@@ -465,6 +465,108 @@ pub fn ssh_write_file(
     Ok(())
 }
 
+/// 远程重启网关
+#[tauri::command]
+pub fn ssh_restart_gateway(
+    manager: State<SshManager>,
+) -> Result<String, String> {
+    ssh_run_gateway_command(manager, "restart")
+}
+
+/// 远程启动网关
+#[tauri::command]
+pub fn ssh_start_gateway(
+    manager: State<SshManager>,
+) -> Result<String, String> {
+    ssh_run_gateway_command(manager, "start")
+}
+
+/// 远程停止网关
+#[tauri::command]
+pub fn ssh_stop_gateway(
+    manager: State<SshManager>,
+) -> Result<String, String> {
+    ssh_run_gateway_command(manager, "stop")
+}
+
+/// 远程执行网关命令（start / stop / restart）
+fn ssh_run_gateway_command(
+    manager: State<SshManager>,
+    action: &str,
+) -> Result<String, String> {
+    let conn = manager.connection.lock().map_err(|e| format!("锁错误: {}", e))?;
+    let conn = conn.as_ref().ok_or("未建立连接")?;
+
+    if !conn.session.authenticated() {
+        return Err("未认证".to_string());
+    }
+
+    let cmd = format!(
+        r#"
+tmp=$(mktemp /tmp/openclawswitch-gateway-{}.XXXXXX 2>/dev/null || echo /tmp/openclawswitch-gateway-{}.log)
+openclaw gateway {} >"$tmp" 2>&1
+code=$?
+echo "__EXIT__$code"
+cat "$tmp" 2>/dev/null || true
+rm -f "$tmp" 2>/dev/null || true
+"#,
+        action, action, action
+    );
+
+    let output = exec_remote_command(&conn.session, &cmd)?;
+    let exit_code = output
+        .lines()
+        .find(|line| line.starts_with("__EXIT__"))
+        .and_then(|line| line.trim_start_matches("__EXIT__").parse::<i32>().ok())
+        .unwrap_or(-1);
+
+    let details = output
+        .lines()
+        .filter(|line| !line.starts_with("__EXIT__"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+
+    if exit_code == 0 {
+        if details.is_empty() {
+            return Ok(format!("远程网关{}成功", action));
+        }
+        return Ok(details);
+    }
+
+    Err(if details.is_empty() {
+        format!("远程网关{}失败", action)
+    } else {
+        format!("远程网关{}失败: {}", action, details)
+    })
+}
+
+/// 远程健康检查（127.0.0.1:18789）
+#[tauri::command]
+pub fn ssh_health_check(
+    manager: State<SshManager>,
+) -> Result<bool, String> {
+    let conn = manager.connection.lock().map_err(|e| format!("锁错误: {}", e))?;
+    let conn = conn.as_ref().ok_or("未建立连接")?;
+
+    if !conn.session.authenticated() {
+        return Err("未认证".to_string());
+    }
+
+    let cmd = r#"
+if curl -fsS --max-time 3 http://127.0.0.1:18789 >/dev/null 2>&1 || \
+   wget -q --timeout=3 -O- http://127.0.0.1:18789 >/dev/null 2>&1; then
+  echo "__HEALTHY__"
+else
+  echo "__UNHEALTHY__"
+fi
+"#;
+
+    let output = exec_remote_command(&conn.session, cmd)?;
+    Ok(output.contains("__HEALTHY__"))
+}
+
 /// 自动搜寻远程服务器上的 OpenClaw 配置文件（通过 test -f 命令）
 #[tauri::command]
 pub fn ssh_search_config(

@@ -49,45 +49,47 @@ const handleSetFallback = (model?: ModelInfo) => {
 </script>
 
 <template>
-  <div :class="cn('rounded-lg border p-4 transition-all hover:shadow-md', containsPrimary ? 'border-blue-500 bg-blue-50/50' : 'border-gray-200 bg-white', props.class)">
+  <div
+    :class="cn('oc-subpanel oc-provider-card p-4 transition-all', containsPrimary ? 'oc-provider-card-active' : '', props.class)"
+  >
     <div class="flex items-start justify-between gap-3">
-      <!-- 提供商信息 -->
       <div class="flex-1 min-w-0">
         <div class="flex items-center gap-2 mb-1">
-          <h3 class="font-semibold text-gray-900 truncate">{{ provider.name }}</h3>
-          <Star v-if="containsPrimary" class="w-4 h-4 text-blue-500 flex-shrink-0" title="包含主模型" />
+          <h3 class="font-semibold truncate" style="color: var(--oc-text-primary);">{{ provider.name }}</h3>
+          <Star v-if="containsPrimary" class="w-4 h-4 flex-shrink-0" style="color: var(--oc-accent);" title="包含主模型" />
         </div>
-        <div class="text-xs text-gray-600 space-y-0.5">
+        <div class="text-xs space-y-0.5" style="color: var(--oc-text-muted);">
           <p class="truncate">{{ provider.baseUrl }}</p>
           <div class="flex items-center gap-3">
-            <span :class="provider.hasApiKey ? 'text-green-600' : ''">
+            <span :style="{ color: provider.hasApiKey ? 'var(--oc-success)' : 'var(--oc-text-muted)' }">
               Key: {{ provider.hasApiKey ? '✓' : '-' }}
             </span>
             <span v-if="provider.api">API: {{ provider.api }}</span>
           </div>
         </div>
 
-        <!-- 模型列表 -->
         <div class="mt-3">
           <button @click="showModels = !showModels"
-                  class="flex items-center gap-1 text-xs text-gray-600 hover:text-gray-900">
+                  class="flex items-center gap-1 text-xs transition-colors"
+                  style="color: var(--oc-text-muted);">
             <Cpu class="w-3 h-3" />
             <span>{{ provider.modelCount }} 个模型</span>
             <component :is="showModels ? ChevronUp : ChevronDown" class="w-3 h-3" />
           </button>
 
-          <div v-if="showModels" class="mt-2 space-y-1 pl-2 border-l-2 border-gray-200">
+          <div v-if="showModels" class="mt-2 space-y-1 pl-2 border-l-2" style="border-color: var(--oc-divider);">
             <div v-for="model in provider.models" :key="model.id"
-                 class="flex items-center justify-between gap-2 py-1.5 px-2 rounded text-xs bg-gray-50 group hover:bg-gray-100">
+                 class="group flex items-center justify-between gap-2 rounded-[9px] border px-2 py-1.5 text-xs"
+                 style="border-color: var(--oc-divider-soft); background: color-mix(in srgb, var(--oc-card-elevated) 82%, transparent);">
               <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-1">
-                  <span class="font-medium text-gray-900 truncate">{{ model.name || model.id }}</span>
-                  <Brain v-if="model.reasoning" class="w-3 h-3 text-purple-500 flex-shrink-0" />
-                  <span v-if="model.contextWindow" class="text-gray-500 flex items-center gap-0.5 flex-shrink-0">
+                  <span class="truncate font-medium" style="color: var(--oc-text-primary);">{{ model.name || model.id }}</span>
+                  <Brain v-if="model.reasoning" class="w-3 h-3 flex-shrink-0" style="color: var(--oc-accent);" />
+                  <span v-if="model.contextWindow" class="flex flex-shrink-0 items-center gap-0.5" style="color: var(--oc-text-muted);">
                     <Zap class="w-2.5 h-2.5" />{{ formatContextWindow(model.contextWindow) }}
                   </span>
                 </div>
-                <div class="text-gray-500 truncate">{{ model.id }}</div>
+                <div class="truncate" style="color: var(--oc-text-muted);">{{ model.id }}</div>
               </div>
               <div class="flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                 <Button variant="ghost" size="sm" @click="handleSetPrimary(model)" title="主要" class="h-6 w-6 p-0">
@@ -96,15 +98,15 @@ const handleSetFallback = (model?: ModelInfo) => {
                 <Button variant="ghost" size="sm" @click="handleSetFallback(model)" title="备用" class="h-6 w-6 p-0">
                   <Shield class="w-3 h-3" />
                 </Button>
-                <Button variant="ghost" size="sm" @click="handleRemoveModel(model.id)" title="删除" class="h-6 w-6 p-0 text-destructive">
+                <Button variant="ghost" size="sm" @click="handleRemoveModel(model.id)" title="删除" class="h-6 w-6 p-0" style="color: var(--oc-danger);">
                   <X class="w-3 h-3" />
                 </Button>
               </div>
             </div>
 
-            <!-- 添加模型按钮 -->
             <button @click="emit('addModel', provider.name)"
-                    class="flex items-center gap-1 py-1 px-2 text-xs text-gray-600 hover:text-gray-900 w-full text-left">
+                    class="flex w-full items-center gap-1 px-2 py-1 text-left text-xs transition-colors"
+                    style="color: var(--oc-text-secondary);">
               <Plus class="w-3 h-3" />
               添加模型
             </button>
@@ -112,15 +114,26 @@ const handleSetFallback = (model?: ModelInfo) => {
         </div>
       </div>
 
-      <!-- 操作按钮 -->
       <div class="flex flex-col gap-1 flex-shrink-0">
         <Button variant="ghost" size="sm" @click="emit('edit')" class="h-7 text-xs" title="编辑">
           <Pencil class="w-3 h-3" />
         </Button>
-        <Button variant="ghost" size="sm" @click="emit('delete')" class="h-7 text-xs text-destructive" title="删除">
+        <Button variant="ghost" size="sm" @click="emit('delete')" class="h-7 text-xs" style="color: var(--oc-danger);" title="删除">
           <Trash2 class="w-3 h-3" />
         </Button>
       </div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.oc-provider-card {
+  overflow: visible;
+  box-shadow: none;
+}
+
+.oc-provider-card-active {
+  border-color: color-mix(in srgb, var(--oc-input-focus) 78%, var(--oc-card-border) 22%);
+  box-shadow: none;
+}
+</style>

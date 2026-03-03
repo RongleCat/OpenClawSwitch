@@ -1,6 +1,10 @@
+use flate2::read::GzDecoder;
 use serde::Serialize;
+use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use tauri::{AppHandle, Manager};
 
@@ -96,6 +100,50 @@ pub struct InstallStepTimingEvent {
     pub duration: u64,
 }
 
+/// 工作台实时日志事件
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RealtimeLogEvent {
+    pub message: String,
+    pub level: String,
+    pub timestamp: u64,
+}
+
+/// 工作台日志跟踪状态事件
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RealtimeLogStatusEvent {
+    pub running: bool,
+    pub reason: Option<String>,
+}
+
+/// 服务诊断任务状态事件
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorStatusEvent {
+    pub running: bool,
+    pub mode: String,
+    pub success: Option<bool>,
+    pub exit_code: Option<i32>,
+    pub reason: Option<String>,
+}
+
+/// 消息渠道扩展安装状态
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelExtensionStatus {
+    pub feishu_installed: bool,
+    pub dingtalk_installed: bool,
+}
+
+/// 消息渠道扩展安装流程状态事件
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelExtensionInstallStateEvent {
+    pub channel_id: String,
+    pub status: String,
+}
+
 // ============================================================================
 // 镜像源配置
 // ============================================================================
@@ -122,6 +170,9 @@ const FNM_MIRRORS: &[&str] = &[
 
 // 下载超时（秒）
 const DOWNLOAD_TIMEOUT_SECS: u64 = 30;
+static LOG_FOLLOW_RUNNING: AtomicBool = AtomicBool::new(false);
+static DOCTOR_RUNNING: AtomicBool = AtomicBool::new(false);
+static CHANNEL_EXTENSION_INSTALLING: AtomicBool = AtomicBool::new(false);
 
 // ============================================================================
 // 辅助函数
@@ -186,6 +237,334 @@ fn emit_timing(app: &AppHandle, step: &str, start: u64, end: u64) {
             duration: end - start,
         },
     );
+}
+
+/// 发送工作台实时日志行事件
+fn emit_runtime_log(app: &AppHandle, message: &str, level: &str) {
+    let _ = app.emit_all(
+        "openclaw-log-line",
+        RealtimeLogEvent {
+            message: message.to_string(),
+            level: level.to_string(),
+            timestamp: now_ms(),
+        },
+    );
+}
+
+/// 发送工作台日志跟踪状态事件
+fn emit_runtime_log_status(app: &AppHandle, running: bool, reason: Option<String>) {
+    let _ = app.emit_all(
+        "openclaw-log-status",
+        RealtimeLogStatusEvent {
+            running,
+            reason,
+        },
+    );
+}
+
+/// 发送服务诊断日志行事件
+fn emit_doctor_log(app: &AppHandle, message: &str, level: &str) {
+    let _ = app.emit_all(
+        "openclaw-doctor-line",
+        RealtimeLogEvent {
+            message: message.to_string(),
+            level: level.to_string(),
+            timestamp: now_ms(),
+        },
+    );
+}
+
+/// 发送服务诊断状态事件
+fn emit_doctor_status(
+    app: &AppHandle,
+    running: bool,
+    mode: &str,
+    success: Option<bool>,
+    exit_code: Option<i32>,
+    reason: Option<String>,
+) {
+    let _ = app.emit_all(
+        "openclaw-doctor-status",
+        DoctorStatusEvent {
+            running,
+            mode: mode.to_string(),
+            success,
+            exit_code,
+            reason,
+        },
+    );
+}
+
+fn detect_doctor_log_level(line: &str, from_stderr: bool) -> &'static str {
+    let lower = line.to_lowercase();
+    let error_signal = lower.contains("error")
+        || lower.contains("fatal")
+        || lower.contains("exception")
+        || lower.contains("panic")
+        || lower.contains("failed")
+        || lower.contains("fail")
+        || lower.contains("denied")
+        || lower.contains("unauthorized")
+        || lower.contains("forbidden")
+        || lower.contains("refused")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("invalid")
+        || lower.contains("cannot")
+        || lower.contains("unable")
+        || lower.contains("enoent")
+        || lower.contains("econn")
+        || lower.contains("错误")
+        || lower.contains("失败")
+        || lower.contains("异常")
+        || lower.contains("✗")
+        || lower.contains("×");
+
+    if error_signal {
+        return "error";
+    }
+
+    let warn_signal = lower.contains("warn")
+        || lower.contains("warning")
+        || lower.contains("deprecated")
+        || lower.contains("建议")
+        || lower.contains("警告");
+    if warn_signal {
+        return "warn";
+    }
+
+    let success_signal = lower.contains("success")
+        || lower.contains("healthy")
+        || lower.contains("passed")
+        || lower.contains("完成")
+        || lower.contains("✓");
+    if success_signal {
+        return "success";
+    }
+
+    if from_stderr {
+        "warn"
+    } else {
+        "info"
+    }
+}
+
+/// 发送渠道扩展安装日志事件（沿用 install-log 结构，前端可复用日志面板）
+fn emit_channel_extension_log(app: &AppHandle, channel_id: &str, message: &str, level: &str) {
+    let _ = app.emit_all(
+        "channel-extension-install-log",
+        InstallLogEvent {
+            step: channel_id.to_string(),
+            message: message.to_string(),
+            level: level.to_string(),
+            timestamp: now_ms(),
+        },
+    );
+}
+
+/// 发送渠道扩展安装状态事件
+fn emit_channel_extension_state(app: &AppHandle, channel_id: &str, status: &str) {
+    let _ = app.emit_all(
+        "channel-extension-install-state",
+        ChannelExtensionInstallStateEvent {
+            channel_id: channel_id.to_string(),
+            status: status.to_string(),
+        },
+    );
+}
+
+fn is_openclaw_package_root(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    if !name.eq_ignore_ascii_case("openclaw") {
+        return false;
+    }
+
+    let parent_is_node_modules = path
+        .parent()
+        .and_then(|value| value.file_name())
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case("node_modules"))
+        .unwrap_or(false);
+
+    parent_is_node_modules && path.join("package.json").is_file()
+}
+
+fn parse_path_line(line: &str) -> Option<PathBuf> {
+    let value = line.trim().trim_matches('"').trim_matches('\'');
+    if value.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(value))
+}
+
+fn detect_openclaw_root_from_npm_ls() -> Option<PathBuf> {
+    let npm = npm_executable();
+    let cmd = format!("{} ls -g openclaw --parseable --depth=0", npm);
+    let output = run_shell(&with_fnm_env(&cmd)).ok()?;
+    for line in output.lines().rev() {
+        let Some(candidate) = parse_path_line(line) else {
+            continue;
+        };
+        if is_openclaw_package_root(&candidate) {
+            return Some(candidate);
+        }
+        if let Ok(resolved) = std::fs::canonicalize(&candidate) {
+            if is_openclaw_package_root(&resolved) {
+                return Some(resolved);
+            }
+        }
+    }
+    None
+}
+
+fn detect_openclaw_root_from_npm_root() -> Option<PathBuf> {
+    let npm = npm_executable();
+    let cmd = format!("{} root -g", npm);
+    let output = run_shell(&with_fnm_env(&cmd)).ok()?;
+    for line in output.lines().rev() {
+        let Some(root) = parse_path_line(line) else {
+            continue;
+        };
+        let candidate = root.join("openclaw");
+        if is_openclaw_package_root(&candidate) {
+            return Some(candidate);
+        }
+        if let Ok(resolved) = std::fs::canonicalize(&candidate) {
+            if is_openclaw_package_root(&resolved) {
+                return Some(resolved);
+            }
+        }
+    }
+    None
+}
+
+fn find_openclaw_root_in_ancestors(path: &Path) -> Option<PathBuf> {
+    for ancestor in path.ancestors() {
+        if is_openclaw_package_root(ancestor) {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
+}
+
+fn detect_openclaw_bin_path() -> Option<PathBuf> {
+    let locate_cmd = if cfg!(target_os = "windows") {
+        "where openclaw"
+    } else {
+        "command -v openclaw || which openclaw"
+    };
+    let output = run_shell(&with_fnm_env(locate_cmd)).ok()?;
+    for line in output.lines() {
+        let Some(candidate) = parse_path_line(line) else {
+            continue;
+        };
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn detect_openclaw_root_from_bin_path() -> Option<PathBuf> {
+    let bin_path = detect_openclaw_bin_path()?;
+    let resolved_bin_path = std::fs::canonicalize(&bin_path).unwrap_or_else(|_| bin_path.clone());
+
+    if let Some(root) = find_openclaw_root_in_ancestors(&resolved_bin_path) {
+        return Some(root);
+    }
+    if let Some(root) = find_openclaw_root_in_ancestors(&bin_path) {
+        return Some(root);
+    }
+
+    let mut candidates = Vec::new();
+    for path in [&bin_path, &resolved_bin_path] {
+        if let Some(parent) = path.parent() {
+            candidates.push(parent.join("node_modules").join("openclaw"));
+            candidates.push(parent.join("..").join("node_modules").join("openclaw"));
+            candidates.push(parent.join("..").join("lib").join("node_modules").join("openclaw"));
+        }
+    }
+
+    for candidate in candidates {
+        if is_openclaw_package_root(&candidate) {
+            return Some(candidate);
+        }
+        if let Ok(resolved) = std::fs::canonicalize(&candidate) {
+            if is_openclaw_package_root(&resolved) {
+                return Some(resolved);
+            }
+        }
+    }
+
+    None
+}
+
+fn detect_openclaw_package_root() -> Result<PathBuf, String> {
+    if let Some(path) = detect_openclaw_root_from_npm_ls() {
+        return Ok(path);
+    }
+    if let Some(path) = detect_openclaw_root_from_npm_root() {
+        return Ok(path);
+    }
+    if let Some(path) = detect_openclaw_root_from_bin_path() {
+        return Ok(path);
+    }
+
+    Err("未能定位 openclaw 的 npm 安装目录，请确认 openclaw 可通过 npm 全局访问".to_string())
+}
+
+fn get_extensions_root() -> Result<PathBuf, String> {
+    let openclaw_root = detect_openclaw_package_root()?;
+    Ok(openclaw_root.join("extensions"))
+}
+
+fn get_extension_meta(channel_id: &str) -> Result<(&'static str, &'static str), String> {
+    match channel_id {
+        "feishu" => Ok(("@m1heng-clawd/feishu", "feishu")),
+        "dingtalk" => Ok(("@dingtalk-real-ai/dingtalk-connector", "dingtalk")),
+        _ => Err(format!("不支持的渠道扩展: {}", channel_id)),
+    }
+}
+
+fn is_channel_extension_installed(target_dir_name: &str) -> bool {
+    let extensions_root = match get_extensions_root() {
+        Ok(path) => path,
+        Err(_) => return false,
+    };
+
+    let target_dir = extensions_root.join(target_dir_name);
+    target_dir.exists()
+        && target_dir.join("package.json").exists()
+        && target_dir.join("node_modules").exists()
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), String> {
+    if !dst.exists() {
+        std::fs::create_dir_all(dst).map_err(|e| format!("创建目录失败: {}", e))?;
+    }
+
+    for entry in std::fs::read_dir(src).map_err(|e| format!("读取目录失败: {}", e))? {
+        let entry = entry.map_err(|e| format!("读取目录项失败: {}", e))?;
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_all(&path, &target)?;
+        } else {
+            std::fs::copy(&path, &target).map_err(|e| format!("复制文件失败: {}", e))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn npm_executable() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "npm.cmd"
+    } else {
+        "npm"
+    }
 }
 
 /// 执行命令并返回 stdout（跨平台）
@@ -326,8 +705,85 @@ fn run_shell_with_log(app: &AppHandle, step: &str, cmd: &str) -> Result<String, 
     }
 }
 
+fn has_system_node() -> bool {
+    if run_cmd("node", &["--version"]).is_ok() {
+        return true;
+    }
+
+    let candidate_paths: &[&str] = if cfg!(target_os = "windows") {
+        &[
+            r"C:\Program Files\nodejs\node.exe",
+            r"C:\Program Files (x86)\nodejs\node.exe",
+        ]
+    } else {
+        &[
+            "/opt/homebrew/bin/node",
+            "/usr/local/bin/node",
+            "/usr/bin/node",
+        ]
+    };
+
+    candidate_paths.iter().any(|path| {
+        let candidate = Path::new(path);
+        if !candidate.exists() {
+            return false;
+        }
+        Command::new(candidate)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    })
+}
+
+fn can_execute_fnm_binary_directly() -> bool {
+    if run_cmd("fnm", &["--version"]).is_ok() {
+        return true;
+    }
+
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+
+    let fnm_path = if cfg!(target_os = "windows") {
+        home.join(".fnm").join("fnm.exe")
+    } else {
+        home.join(".fnm").join("fnm")
+    };
+
+    if !fnm_path.exists() {
+        return false;
+    }
+
+    Command::new(fnm_path)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn shell_quote(value: &str) -> String {
+    if cfg!(target_os = "windows") {
+        format!("\"{}\"", value.replace('"', "\\\""))
+    } else {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+}
+
 /// 构建包含 fnm 环境的 shell 命令
 fn with_fnm_env(cmd: &str) -> String {
+    if has_system_node() {
+        return cmd.to_string();
+    }
+
+    if !can_execute_fnm_binary_directly() {
+        return cmd.to_string();
+    }
+
     if cfg!(target_os = "windows") {
         // Windows: 使用 PowerShell 执行 fnm 相关命令
         let fnm_dir = "$env:USERPROFILE\\.fnm";
@@ -341,6 +797,230 @@ fn with_fnm_env(cmd: &str) -> String {
             cmd
         )
     }
+}
+
+fn parse_openclaw_config_get_value(raw: &str) -> String {
+    let line = raw
+        .lines()
+        .rev()
+        .find(|item| !item.trim().is_empty())
+        .map(|item| item.trim())
+        .unwrap_or("");
+
+    let value = if let Some((_, right)) = line.split_once('=') {
+        right.trim()
+    } else {
+        line
+    };
+
+    value
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string()
+}
+
+fn is_redacted_or_empty_secret(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    lowered.contains("redacted")
+}
+
+fn get_local_openclaw_config_path() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or("无法获取用户主目录")?;
+    let config_dir = home.join(".openclaw");
+    let openclaw_path = config_dir.join("openclaw.json");
+    if openclaw_path.exists() {
+        return Ok(openclaw_path);
+    }
+
+    let clawdbot_path = config_dir.join("clawdbot.json");
+    if clawdbot_path.exists() {
+        return Ok(clawdbot_path);
+    }
+
+    Err(format!(
+        "未找到配置文件: {}",
+        config_dir.display()
+    ))
+}
+
+fn read_gateway_auth_token_from_local_config() -> Result<String, String> {
+    let config_path = get_local_openclaw_config_path()?;
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("读取配置文件失败({}): {}", config_path.display(), e))?;
+    let config: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("解析配置文件失败: {}", e))?;
+
+    let token = config
+        .get("gateway")
+        .and_then(|gateway| gateway.get("auth"))
+        .and_then(|auth| auth.get("token"))
+        .and_then(|token| token.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    Ok(token)
+}
+
+/// 使用 openclaw config set 写入飞书渠道配置
+#[tauri::command]
+pub async fn set_feishu_channel_config(
+    app_id: String,
+    app_secret: String,
+    enabled: bool,
+) -> Result<String, String> {
+    if app_id.trim().is_empty() {
+        return Err("飞书 App ID 不能为空".to_string());
+    }
+    if app_secret.trim().is_empty() {
+        return Err("飞书 App Secret 不能为空".to_string());
+    }
+
+    let commands = vec![
+        format!(
+            "openclaw config set channels.feishu.appId {}",
+            shell_quote(app_id.trim())
+        ),
+        format!(
+            "openclaw config set channels.feishu.appSecret {}",
+            shell_quote(app_secret.trim())
+        ),
+        format!(
+            "openclaw config set channels.feishu.enabled {}",
+            if enabled { "true" } else { "false" }
+        ),
+    ];
+
+    for command in commands {
+        run_shell(&with_fnm_env(&command))
+            .map_err(|error| format!("执行 `{}` 失败: {}", command, error))?;
+    }
+
+    Ok("飞书渠道配置写入成功".to_string())
+}
+
+/// 使用 openclaw config set 写入钉钉渠道配置
+#[tauri::command]
+pub async fn set_dingtalk_channel_config(
+    client_id: String,
+    client_secret: String,
+    enabled: bool,
+) -> Result<String, String> {
+    if client_id.trim().is_empty() {
+        return Err("钉钉 Client ID 不能为空".to_string());
+    }
+    if client_secret.trim().is_empty() {
+        return Err("钉钉 Client Secret 不能为空".to_string());
+    }
+
+    let commands = vec![
+        format!(
+            "openclaw config set channels.dingtalk-connector.clientId {}",
+            shell_quote(client_id.trim())
+        ),
+        format!(
+            "openclaw config set channels.dingtalk-connector.clientSecret {}",
+            shell_quote(client_secret.trim())
+        ),
+        format!(
+            "openclaw config set channels.dingtalk-connector.enabled {}",
+            if enabled { "true" } else { "false" }
+        ),
+    ];
+
+    for command in commands {
+        run_shell(&with_fnm_env(&command))
+            .map_err(|error| format!("执行 `{}` 失败: {}", command, error))?;
+    }
+
+    if enabled {
+        // 启用钉钉时补齐 gateway.http.chatCompletions（合并到现有 gateway）
+        let enable_chat_completions_cmd =
+            "openclaw config set gateway.http.endpoints.chatCompletions.enabled true";
+        run_shell(&with_fnm_env(enable_chat_completions_cmd))
+            .map_err(|error| format!("写入 gateway.http.endpoints.chatCompletions.enabled 失败: {}", error))?;
+
+        // 先显式启用 token 鉴权，触发 token 生成流程
+        let ensure_gateway_auth_mode_cmd = "openclaw config set gateway.auth.mode token";
+        run_shell(&with_fnm_env(ensure_gateway_auth_mode_cmd))
+            .map_err(|error| format!("设置 gateway.auth.mode 失败: {}", error))?;
+
+        // 优先从本地配置文件读取真实 token（避免 config get 脱敏返回）
+        let mut gateway_token = read_gateway_auth_token_from_local_config().unwrap_or_default();
+
+        // 兜底：尝试用 CLI 读取
+        if is_redacted_or_empty_secret(&gateway_token) {
+            let get_gateway_token_cmd = "openclaw config get gateway.auth.token";
+            if let Ok(gateway_token_raw) = run_shell(&with_fnm_env(get_gateway_token_cmd)) {
+                gateway_token = parse_openclaw_config_get_value(&gateway_token_raw);
+            }
+        }
+
+        // 仍拿不到就主动生成并写入
+        if is_redacted_or_empty_secret(&gateway_token) {
+            let generated_gateway_token = format!("openclaw-{:x}", now_ms());
+            let set_gateway_auth_token_cmd = format!(
+                "openclaw config set gateway.auth.token {}",
+                shell_quote(&generated_gateway_token)
+            );
+            run_shell(&with_fnm_env(&set_gateway_auth_token_cmd))
+                .map_err(|error| format!("生成 gateway.auth.token 失败: {}", error))?;
+            gateway_token = generated_gateway_token;
+        }
+
+        if is_redacted_or_empty_secret(&gateway_token) {
+            return Err("读取 gateway.auth.token 失败: token 未生成或被脱敏".to_string());
+        }
+
+        let set_gateway_token_cmd = format!(
+            "openclaw config set channels.dingtalk-connector.gatewayToken {}",
+            shell_quote(&gateway_token)
+        );
+        run_shell(&with_fnm_env(&set_gateway_token_cmd))
+            .map_err(|error| format!("写入 channels.dingtalk-connector.gatewayToken 失败: {}", error))?;
+
+        let enable_media_upload_cmd =
+            "openclaw config set channels.dingtalk-connector.enableMediaUpload true";
+        run_shell(&with_fnm_env(enable_media_upload_cmd))
+            .map_err(|error| format!("写入 channels.dingtalk-connector.enableMediaUpload 失败: {}", error))?;
+    }
+
+    Ok("钉钉渠道配置写入成功".to_string())
+}
+
+/// 使用 openclaw pairing approve feishu <code> 执行飞书配对
+#[tauri::command]
+pub async fn approve_feishu_pairing(pairing_code: String) -> Result<String, String> {
+    let code = pairing_code.trim();
+    if code.is_empty() {
+        return Err("配对码不能为空".to_string());
+    }
+
+    let command = format!(
+        "openclaw pairing approve feishu {}",
+        shell_quote(code)
+    );
+
+    let output = run_shell(&with_fnm_env(&command))
+        .map_err(|error| format!("飞书配对失败: {}", error))?;
+
+    if output.is_empty() {
+        Ok("飞书配对成功".to_string())
+    } else {
+        Ok(output)
+    }
+}
+
+/// 兼容保留：钉钉渠道不再需要手动配对（防止旧注册残留导致编译失败）
+#[allow(dead_code)]
+#[tauri::command]
+pub async fn approve_dingtalk_pairing(_pairing_code: String) -> Result<String, String> {
+    Err("钉钉渠道无需填写配对码，请直接配置 Client ID / Client Secret 并启用。".to_string())
 }
 
 /// 带进度监控的下载函数（支持多镜像源自动切换）
@@ -1167,13 +1847,14 @@ pub async fn run_full_install(app: AppHandle) -> Result<String, String> {
 pub async fn open_terminal_with_command(command: String) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
+        let wrapped_command = format!("{}; exec $SHELL -l", command);
         // macOS: 使用 osascript 打开 Terminal.app 并执行命令
         let script = format!(
             "tell application \"Terminal\"\n\
              activate\n\
              do script \"{}\"\n\
              end tell",
-            command.replace("\"", "\\\"")
+            wrapped_command.replace("\"", "\\\"")
         );
 
         Command::new("osascript")
@@ -1197,20 +1878,31 @@ pub async fn open_terminal_with_command(command: String) -> Result<String, Strin
 
     #[cfg(target_os = "linux")]
     {
-        // Linux: 尝试多种终端模拟器
-        let terminals = [
-            ("gnome-terminal", vec!["--", "bash", "-c", &command]),
-            ("konsole", vec!["-e", "bash", "-c", &command]),
-            ("xterm", vec!["-e", "bash", "-c", &command]),
-            ("x-terminal-emulator", vec!["-e", "bash", "-c", &command]),
-        ];
+        // Linux: 尝试多种终端模拟器，执行后保持窗口不自动关闭
+        let wrapped_command = format!("{}; exec ${SHELL:-bash} -l", command);
+        let terminals = ["gnome-terminal", "konsole", "xterm", "x-terminal-emulator"];
 
-        for (term, args) in &terminals {
-            if Command::new("which").arg(term).output().is_ok() {
-                Command::new(term)
-                    .args(args)
-                    .spawn()
-                    .map_err(|e| format!("打开终端失败: {}", e))?;
+        for term in &terminals {
+            let exists = Command::new("which")
+                .arg(term)
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false);
+            if !exists {
+                continue;
+            }
+
+            let mut cmd = Command::new(term);
+            match *term {
+                "gnome-terminal" => {
+                    cmd.args(["--", "bash", "-lc", &wrapped_command]);
+                }
+                _ => {
+                    cmd.args(["-e", "bash", "-lc", &wrapped_command]);
+                }
+            }
+
+            if cmd.spawn().is_ok() {
                 return Ok("已打开终端".to_string());
             }
         }
@@ -1247,35 +1939,21 @@ pub async fn generate_default_config(app: AppHandle) -> Result<String, String> {
     let token = format!("openclaw-{:x}", timestamp);
 
     // 默认配置（最精简可启动）
+    // 参考官方配置文档：最小可用配置 + gateway.mode=local，确保 gateway 可启动
     let default_config = serde_json::json!({
         "gateway": {
             "mode": "local",
             "port": 18789,
-            "bind": "loopback"
+            "bind": "loopback",
+            "auth": {
+                "mode": "token",
+                "token": token
+            }
         },
         "agents": {
             "defaults": {
-                "workspace": "~/.openclaw/workspace",
-                "model": {
-                    "primary": "local/placeholder"
-                }
-            },
-            "list": [
-                {
-                    "id": "main",
-                    "default": true
-                }
-            ]
-        },
-        "hooks": {
-            "enabled": true,
-            "token": token,
-            "path": "/hooks",
-            "maxBodyBytes": 262144,
-            "defaultSessionKey": "hook:ingress",
-            "allowRequestSessionKey": false,
-            "allowedSessionKeyPrefixes": ["hook:"],
-            "allowedAgentIds": ["hooks", "main"]
+                "workspace": "~/.openclaw/workspace"
+            }
         }
     });
 
@@ -1317,15 +1995,444 @@ pub async fn install_gateway_service(app: AppHandle) -> Result<String, String> {
     }
 }
 
+/// 启动本地网关服务
+#[tauri::command]
+pub async fn start_gateway() -> Result<String, String> {
+    let cmd = with_fnm_env("openclaw gateway start");
+    let output = run_shell(&cmd)?;
+    if output.is_empty() {
+        Ok("网关启动命令已执行".to_string())
+    } else {
+        Ok(output)
+    }
+}
+
+/// 停止本地网关服务
+#[tauri::command]
+pub async fn stop_gateway() -> Result<String, String> {
+    let cmd = with_fnm_env("openclaw gateway stop");
+    let output = run_shell(&cmd)?;
+    if output.is_empty() {
+        Ok("网关停止命令已执行".to_string())
+    } else {
+        Ok(output)
+    }
+}
+
+/// 获取消息渠道扩展安装状态
+#[tauri::command]
+pub async fn get_channel_extension_status() -> Result<ChannelExtensionStatus, String> {
+    Ok(ChannelExtensionStatus {
+        feishu_installed: is_channel_extension_installed("feishu"),
+        dingtalk_installed: is_channel_extension_installed("dingtalk"),
+    })
+}
+
+/// 安装消息渠道扩展（feishu / dingtalk）
+#[tauri::command]
+pub async fn install_channel_extension(app: AppHandle, channel_id: String) -> Result<String, String> {
+    if CHANNEL_EXTENSION_INSTALLING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("已有扩展安装任务正在进行，请稍后再试".to_string());
+    }
+
+    let install_result = (|| -> Result<String, String> {
+        let (npm_package, target_dir_name) = get_extension_meta(&channel_id)?;
+        let npm = npm_executable();
+        let extensions_root = get_extensions_root()?;
+        std::fs::create_dir_all(&extensions_root).map_err(|e| format!("创建扩展目录失败: {}", e))?;
+
+        emit_channel_extension_state(&app, &channel_id, "running");
+        emit_channel_extension_log(
+            &app,
+            &channel_id,
+            &format!("开始安装 {} 扩展", channel_id),
+            "info",
+        );
+        emit_channel_extension_log(
+            &app,
+            &channel_id,
+            &format!("目标包: {}", npm_package),
+            "info",
+        );
+
+        let temp_dir = std::env::temp_dir()
+            .join(format!("openclawswitch-extension-{}-{}", target_dir_name, now_ms()));
+        std::fs::create_dir_all(&temp_dir).map_err(|e| format!("创建临时目录失败: {}", e))?;
+        emit_channel_extension_log(
+            &app,
+            &channel_id,
+            &format!("临时目录: {}", temp_dir.display()),
+            "info",
+        );
+
+        let pack_output = Command::new(npm)
+            .arg("pack")
+            .arg(npm_package)
+            .current_dir(&temp_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("执行 npm pack 失败: {}", e))?;
+
+        if !pack_output.status.success() {
+            let stderr = String::from_utf8_lossy(&pack_output.stderr).trim().to_string();
+            let msg = if stderr.is_empty() {
+                "npm pack 失败".to_string()
+            } else {
+                format!("npm pack 失败: {}", stderr)
+            };
+            emit_channel_extension_log(&app, &channel_id, &msg, "error");
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            return Err(msg);
+        }
+
+        let pack_stdout = String::from_utf8_lossy(&pack_output.stdout);
+        let tar_name = pack_stdout
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .map(|line| line.trim().to_string())
+            .ok_or("无法解析 npm pack 输出文件名")?;
+        let tarball_path = temp_dir.join(&tar_name);
+        if !tarball_path.exists() {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            return Err(format!("未找到下载包: {}", tarball_path.display()));
+        }
+        emit_channel_extension_log(
+            &app,
+            &channel_id,
+            &format!("包下载完成: {}", tar_name),
+            "success",
+        );
+
+        let tar_file = File::open(&tarball_path).map_err(|e| format!("打开压缩包失败: {}", e))?;
+        let gzip = GzDecoder::new(tar_file);
+        let mut archive = tar::Archive::new(gzip);
+        archive
+            .unpack(&temp_dir)
+            .map_err(|e| format!("解压压缩包失败: {}", e))?;
+        emit_channel_extension_log(&app, &channel_id, "解压完成", "success");
+
+        let unpacked_dir = temp_dir.join("package");
+        if !unpacked_dir.exists() {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            return Err("解压结果异常: 未找到 package 目录".to_string());
+        }
+
+        let target_dir = extensions_root.join(target_dir_name);
+        if target_dir.exists() {
+            std::fs::remove_dir_all(&target_dir).map_err(|e| format!("清理旧扩展失败: {}", e))?;
+        }
+
+        match std::fs::rename(&unpacked_dir, &target_dir) {
+            Ok(_) => {}
+            Err(_) => {
+                copy_dir_all(&unpacked_dir, &target_dir)?;
+                let _ = std::fs::remove_dir_all(&unpacked_dir);
+            }
+        }
+        emit_channel_extension_log(
+            &app,
+            &channel_id,
+            &format!("扩展目录已就绪: {}", target_dir.display()),
+            "success",
+        );
+
+        let install_output = Command::new(npm)
+            .arg("install")
+            .arg("--registry=https://registry.npmmirror.com")
+            .current_dir(&target_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("执行 npm install 失败: {}", e))?;
+
+        if !install_output.status.success() {
+            let stderr = String::from_utf8_lossy(&install_output.stderr).trim().to_string();
+            let msg = if stderr.is_empty() {
+                "npm install 失败".to_string()
+            } else {
+                format!("npm install 失败: {}", stderr)
+            };
+            emit_channel_extension_log(&app, &channel_id, &msg, "error");
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            return Err(msg);
+        }
+
+        emit_channel_extension_log(
+            &app,
+            &channel_id,
+            "依赖安装完成（registry: npmmirror）",
+            "success",
+        );
+
+        if !is_channel_extension_installed(target_dir_name) {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            return Err("安装完成校验失败，请重试".to_string());
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let ok_msg = format!("{} 扩展安装完成", channel_id);
+        emit_channel_extension_log(&app, &channel_id, &ok_msg, "success");
+        Ok(ok_msg)
+    })();
+
+    CHANNEL_EXTENSION_INSTALLING.store(false, Ordering::SeqCst);
+
+    match install_result {
+        Ok(message) => {
+            emit_channel_extension_state(&app, &channel_id, "success");
+            Ok(message)
+        }
+        Err(error) => {
+            emit_channel_extension_state(&app, &channel_id, "error");
+            Err(error)
+        }
+    }
+}
+
+/// 启动 openclaw logs --follow 实时日志跟踪（运行中时拒绝重复启动）
+#[tauri::command]
+pub fn start_openclaw_logs_follow(app: AppHandle) -> Result<bool, String> {
+    if LOG_FOLLOW_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        emit_runtime_log_status(&app, true, Some("日志跟踪已在运行".to_string()));
+        return Ok(false);
+    }
+
+    emit_runtime_log_status(&app, true, Some("开始跟踪 openclaw logs --follow".to_string()));
+
+    thread::spawn(move || {
+        let follow_cmd = with_fnm_env("openclaw logs --follow");
+        let spawn_result = if cfg!(target_os = "windows") {
+            Command::new("cmd")
+                .args(["/c", &follow_cmd])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+        } else {
+            Command::new("sh")
+                .args(["-c", &follow_cmd])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+        };
+
+        let mut child = match spawn_result {
+            Ok(child) => child,
+            Err(error) => {
+                let reason = format!("启动日志跟踪失败: {}", error);
+                emit_runtime_log(&app, &reason, "error");
+                LOG_FOLLOW_RUNNING.store(false, Ordering::SeqCst);
+                emit_runtime_log_status(&app, false, Some(reason));
+                return;
+            }
+        };
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        let stderr_app = app.clone();
+        let stderr_handle = stderr.map(move |err| {
+            thread::spawn(move || {
+                let reader = BufReader::new(err);
+                for line in reader.lines().flatten() {
+                    if !line.trim().is_empty() {
+                        emit_runtime_log(&stderr_app, &line, "warn");
+                    }
+                }
+            })
+        });
+
+        if let Some(out) = stdout {
+            let reader = BufReader::new(out);
+            for line in reader.lines().flatten() {
+                if !line.trim().is_empty() {
+                    emit_runtime_log(&app, &line, "info");
+                }
+            }
+        }
+
+        if let Some(handle) = stderr_handle {
+            let _ = handle.join();
+        }
+
+        let reason = match child.wait() {
+            Ok(status) if status.success() => "日志跟踪已结束".to_string(),
+            Ok(status) => format!("日志跟踪已退出，退出码: {:?}", status.code()),
+            Err(error) => format!("日志跟踪进程异常: {}", error),
+        };
+        let level = if reason.contains("异常") || reason.contains("退出码") {
+            "warn"
+        } else {
+            "info"
+        };
+
+        emit_runtime_log(&app, &reason, level);
+        LOG_FOLLOW_RUNNING.store(false, Ordering::SeqCst);
+        emit_runtime_log_status(&app, false, Some(reason));
+    });
+
+    Ok(true)
+}
+
+/// 查询服务诊断任务是否正在执行
+#[tauri::command]
+pub fn is_openclaw_doctor_running() -> bool {
+    DOCTOR_RUNNING.load(Ordering::SeqCst)
+}
+
+/// 启动服务诊断（fix=true 时执行 openclaw doctor --fix）
+#[tauri::command]
+pub fn start_openclaw_doctor(app: AppHandle, fix: bool) -> Result<bool, String> {
+    let mode = if fix { "fix" } else { "check" };
+    if DOCTOR_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        emit_doctor_status(
+            &app,
+            true,
+            mode,
+            None,
+            None,
+            Some("诊断任务已在运行".to_string()),
+        );
+        return Ok(false);
+    }
+
+    let doctor_cmd = if fix {
+        "openclaw doctor --fix"
+    } else {
+        "openclaw doctor"
+    };
+    let wrapped_cmd = with_fnm_env(doctor_cmd);
+    let mode_name = mode.to_string();
+
+    emit_doctor_status(
+        &app,
+        true,
+        &mode_name,
+        None,
+        None,
+        Some(format!("开始执行 {}", doctor_cmd)),
+    );
+    emit_doctor_log(&app, &format!("$ {}", doctor_cmd), "info");
+
+    thread::spawn(move || {
+        let spawn_result = if cfg!(target_os = "windows") {
+            Command::new("cmd")
+                .args(["/c", &wrapped_cmd])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+        } else {
+            Command::new("sh")
+                .args(["-c", &wrapped_cmd])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+        };
+
+        let mut child = match spawn_result {
+            Ok(child) => child,
+            Err(error) => {
+                let reason = format!("启动服务诊断失败: {}", error);
+                emit_doctor_log(&app, &reason, "error");
+                DOCTOR_RUNNING.store(false, Ordering::SeqCst);
+                emit_doctor_status(&app, false, &mode_name, Some(false), None, Some(reason));
+                return;
+            }
+        };
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        let stderr_app = app.clone();
+        let stderr_handle = stderr.map(move |err| {
+            thread::spawn(move || {
+                let reader = BufReader::new(err);
+                for line in reader.lines().flatten() {
+                    let text = line.trim();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let level = detect_doctor_log_level(text, true);
+                    emit_doctor_log(&stderr_app, text, level);
+                }
+            })
+        });
+
+        if let Some(out) = stdout {
+            let reader = BufReader::new(out);
+            for line in reader.lines().flatten() {
+                let text = line.trim();
+                if text.is_empty() {
+                    continue;
+                }
+                let level = detect_doctor_log_level(text, false);
+                emit_doctor_log(&app, text, level);
+            }
+        }
+
+        if let Some(handle) = stderr_handle {
+            let _ = handle.join();
+        }
+
+        match child.wait() {
+            Ok(status) => {
+                let success = status.success();
+                let exit_code = status.code();
+                let reason = if success {
+                    if mode_name == "fix" {
+                        "自动修复执行完成".to_string()
+                    } else {
+                        "服务诊断执行完成".to_string()
+                    }
+                } else {
+                    format!("服务诊断执行失败，退出码: {:?}", exit_code)
+                };
+                let level = if success { "success" } else { "error" };
+
+                emit_doctor_log(&app, &reason, level);
+                DOCTOR_RUNNING.store(false, Ordering::SeqCst);
+                emit_doctor_status(
+                    &app,
+                    false,
+                    &mode_name,
+                    Some(success),
+                    exit_code,
+                    Some(reason),
+                );
+            }
+            Err(error) => {
+                let reason = format!("服务诊断进程异常: {}", error);
+                emit_doctor_log(&app, &reason, "error");
+                DOCTOR_RUNNING.store(false, Ordering::SeqCst);
+                emit_doctor_status(&app, false, &mode_name, Some(false), None, Some(reason));
+            }
+        }
+    });
+
+    Ok(true)
+}
+
 /// 打开 Web UI
 #[tauri::command]
 pub async fn open_web_ui() -> Result<String, String> {
-    let url = "http://127.0.0.1:18789/";
+    let output = run_shell(&with_fnm_env("openclaw dashboard --no-open"))?;
+    let url = extract_dashboard_url(&output)
+        .ok_or_else(|| format!("无法解析 Dashboard URL，命令输出: {}", output))?;
 
     #[cfg(target_os = "macos")]
     {
         Command::new("open")
-            .arg(url)
+            .arg(&url)
             .spawn()
             .map_err(|e| format!("打开浏览器失败: {}", e))?;
     }
@@ -1333,7 +2440,7 @@ pub async fn open_web_ui() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
         Command::new("cmd")
-            .args(["/c", "start", url])
+            .args(["/c", "start", "", &url])
             .spawn()
             .map_err(|e| format!("打开浏览器失败: {}", e))?;
     }
@@ -1341,12 +2448,34 @@ pub async fn open_web_ui() -> Result<String, String> {
     #[cfg(target_os = "linux")]
     {
         Command::new("xdg-open")
-            .arg(url)
+            .arg(&url)
             .spawn()
             .map_err(|e| format!("打开浏览器失败: {}", e))?;
     }
 
-    Ok("已打开 Web UI".to_string())
+    Ok(format!("已打开 Dashboard: {}", url))
+}
+
+fn extract_dashboard_url(output: &str) -> Option<String> {
+    for line in output.lines() {
+        if let Some((_, raw)) = line.split_once("Dashboard URL:") {
+            let candidate = raw.trim();
+            if candidate.starts_with("http://") || candidate.starts_with("https://") {
+                return Some(candidate.to_string());
+            }
+        }
+    }
+
+    for token in output.split_whitespace() {
+        let normalized = token
+            .trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';' | ')' | '('))
+            .trim();
+        if normalized.starts_with("http://") || normalized.starts_with("https://") {
+            return Some(normalized.to_string());
+        }
+    }
+
+    None
 }
 
 /// 执行 openclaw doctor --fix
@@ -1368,4 +2497,3 @@ pub async fn run_doctor_fix(app: AppHandle) -> Result<String, String> {
         }
     }
 }
-

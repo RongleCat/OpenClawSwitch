@@ -152,11 +152,11 @@ onMounted(loadProfiles)
 </script>
 
 <template>
-  <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" @click.self="emit('close')">
-    <Card class="w-full max-w-lg p-6 m-4 max-h-[85vh] overflow-auto">
+  <div class="oc-modal-overlay" @click.self="emit('close')">
+    <Card class="oc-modal-card w-full max-w-lg p-6 max-h-[85vh] overflow-auto">
       <div class="flex items-center justify-between mb-4">
-        <h3 class="font-semibold text-lg flex items-center gap-2">
-          <Monitor class="w-5 h-5 text-blue-600" />
+        <h3 class="font-semibold text-lg flex items-center gap-2" style="color: var(--oc-text-primary);">
+          <Monitor class="w-5 h-5" style="color: var(--oc-accent);" />
           SSH 远程连接
         </h3>
         <Button variant="ghost" size="sm" @click="emit('close')" class="h-8 w-8 p-0">
@@ -164,20 +164,20 @@ onMounted(loadProfiles)
         </Button>
       </div>
 
-      <!-- 已保存的连接配置 -->
       <div v-if="savedProfiles.length > 0" class="mb-4">
-        <p class="text-xs text-muted-foreground mb-2">已保存的连接</p>
+        <p class="text-xs mb-2" style="color: var(--oc-text-muted);">已保存的连接</p>
         <div class="space-y-1">
           <div
             v-for="profile in savedProfiles"
             :key="profile.id"
-            class="flex items-center gap-2 p-2 rounded-lg border hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer group"
+            class="group flex cursor-pointer items-center gap-2 rounded-[10px] border p-2 transition-colors hover:opacity-90"
+            style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);"
             @click="selectProfile(profile)"
           >
-            <Star class="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />
+            <Star class="w-3.5 h-3.5 flex-shrink-0" style="color: var(--oc-warning);" />
             <div class="flex-1 min-w-0">
-              <div class="text-sm font-medium truncate">{{ profile.name }}</div>
-              <div class="text-xs text-muted-foreground truncate">
+              <div class="truncate text-sm font-medium" style="color: var(--oc-text-primary);">{{ profile.name }}</div>
+              <div class="truncate text-xs" style="color: var(--oc-text-muted);">
                 {{ profile.username }}@{{ profile.host }}:{{ profile.port }}
                 · {{ profile.authMode === 'password' ? '密码' : '私钥' }}
               </div>
@@ -185,7 +185,8 @@ onMounted(loadProfiles)
             <Button
               variant="ghost" size="sm"
               @click.stop="deleteProfile(profile.id)"
-              class="h-6 w-6 p-0 opacity-0 group-hover:opacity-100 text-destructive"
+              class="h-6 w-6 p-0 opacity-0 group-hover:opacity-100"
+              style="color: var(--oc-danger);"
             >
               <Trash2 class="w-3 h-3" />
             </Button>
@@ -193,27 +194,25 @@ onMounted(loadProfiles)
         </div>
       </div>
 
-      <!-- 连接表单 -->
       <div class="space-y-3">
         <div class="grid grid-cols-3 gap-2">
           <div class="col-span-2">
-            <Label class="text-xs mb-1 block">主机地址</Label>
+            <Label class="mb-1 block text-xs">主机地址</Label>
             <Input v-model="host" placeholder="192.168.1.100" :disabled="connecting" />
           </div>
           <div>
-            <Label class="text-xs mb-1 block">端口</Label>
+            <Label class="mb-1 block text-xs">端口</Label>
             <Input v-model.number="port" type="number" placeholder="22" :disabled="connecting" />
           </div>
         </div>
 
         <div>
-          <Label class="text-xs mb-1 block">用户名</Label>
+          <Label class="mb-1 block text-xs">用户名</Label>
           <Input v-model="username" placeholder="root" :disabled="connecting" />
         </div>
 
-        <!-- 认证方式切换 -->
         <div>
-          <Label class="text-xs mb-1 block">认证方式</Label>
+          <Label class="mb-1 block text-xs">认证方式</Label>
           <div class="flex gap-2">
             <Button
               :variant="authMode === 'password' ? 'default' : 'outline'"
@@ -236,16 +235,14 @@ onMounted(loadProfiles)
           </div>
         </div>
 
-        <!-- 密码输入 -->
         <div v-if="authMode === 'password'">
-          <Label class="text-xs mb-1 block">密码</Label>
+          <Label class="mb-1 block text-xs">密码</Label>
           <Input v-model="password" type="password" placeholder="输入密码" :disabled="connecting" @keyup.enter="connect" />
         </div>
 
-        <!-- 私钥选择 -->
         <template v-if="authMode === 'privateKey'">
           <div>
-            <Label class="text-xs mb-1 block">私钥文件</Label>
+            <Label class="mb-1 block text-xs">私钥文件</Label>
             <div class="flex gap-2">
               <Input v-model="keyPath" placeholder="~/.ssh/id_rsa" :disabled="connecting" class="flex-1" />
               <Button variant="outline" size="sm" @click="selectKeyFile" :disabled="connecting">
@@ -254,20 +251,22 @@ onMounted(loadProfiles)
             </div>
           </div>
           <div>
-            <Label class="text-xs mb-1 block">
-              私钥密码 <span class="text-muted-foreground">(可选)</span>
+            <Label class="mb-1 block text-xs">
+              私钥密码 <span style="color: var(--oc-text-muted);">(可选)</span>
             </Label>
             <Input v-model="passphrase" type="password" placeholder="私钥密码" :disabled="connecting" />
           </div>
         </template>
 
-        <!-- 错误提示 -->
-        <div v-if="error" class="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950 p-2 rounded">
+        <div
+          v-if="error"
+          class="rounded-[10px] border p-2 text-sm"
+          style="border-color: color-mix(in srgb, var(--oc-danger) 58%, transparent); color: var(--oc-danger); background: color-mix(in srgb, var(--oc-danger) 12%, transparent);"
+        >
           {{ error }}
         </div>
       </div>
 
-      <!-- 操作按钮 -->
       <div class="flex items-center justify-between mt-5">
         <Button
           variant="ghost" size="sm"
@@ -287,8 +286,7 @@ onMounted(loadProfiles)
         </div>
       </div>
 
-      <!-- 保存配置表单 -->
-      <div v-if="showSaveForm" class="mt-3 p-3 border rounded-lg bg-gray-50 dark:bg-gray-800">
+      <div v-if="showSaveForm" class="mt-3 rounded-[10px] border p-3" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
         <div class="flex gap-2">
           <Input v-model="profileName" placeholder="配置名称" class="flex-1" />
           <Button size="sm" @click="saveCurrentProfile">保存</Button>

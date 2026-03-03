@@ -9,7 +9,7 @@ interface Props {
 const props = defineProps<Props>()
 
 const classes = computed(() =>
-  cn('text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70', props.class)
+  cn('text-sm font-medium leading-none text-[var(--oc-text-secondary)] peer-disabled:cursor-not-allowed peer-disabled:opacity-70', props.class)
 )
 </script>
 

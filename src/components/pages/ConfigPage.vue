@@ -7,17 +7,18 @@ import Input from '../ui/Input.vue'
 import Label from '../ui/Label.vue'
 import Card from '../ui/Card.vue'
 import ProviderCard from '../ProviderCard.vue'
-import SshConnectModal from '../SshConnectModal.vue'
-import SshFingerprintDialog from '../SshFingerprintDialog.vue'
 import RemoteFileBrowser from '../RemoteFileBrowser.vue'
+import SshSaveConfirmModal from '../SshSaveConfirmModal.vue'
 import {
   Server, Settings, ListTree, Save, Download, Plus, X, ChevronDown, FolderOpen, FileCode,
-  RefreshCw, Terminal, Wrench, Hammer, Monitor, WifiOff
+  RefreshCw, Terminal, Wrench, Hammer, Monitor, Loader2
 } from 'lucide-vue-next'
 import type {
   OpenClawConfig, ProviderInfo, ModelSelectionInfo, ConfigFileInfo, ProviderPreset,
-  FingerprintInfo
 } from '../../types/config'
+import { isPrimaryModelPlaceholder } from '../../domain/configValidation'
+import { nextValidateSteps } from '../../domain/validateFlow'
+import { buildJsonDiffSummary, type JsonDiffSummary } from '../../domain/jsonDiff'
 
 // ============================================================================
 // Props & Events
@@ -27,10 +28,6 @@ const props = defineProps<{
   showToast: (type: 'success' | 'error', message: string) => void
   envMode?: 'local' | 'ssh'
   envSshConnected?: boolean
-}>()
-
-const emit = defineEmits<{
-  close: []
 }>()
 
 // ============================================================================
@@ -51,13 +48,12 @@ const modelSelection = ref<ModelSelectionInfo>({ primary: null, fallbacks: [] })
 const loading = ref(false)
 
 // SSH 状态
-const showSshModal = ref(false)
-const showFingerprintDialog = ref(false)
 const showFileBrowser = ref(false)
 const sshConnected = ref(false)
-const sshFingerprint = ref<FingerprintInfo | null>(null)
-const sshFingerprintCallback = ref<(() => void) | null>(null)
 const sshRemotePath = ref('')
+const showSshSaveConfirm = ref(false)
+const sshDiffSummary = ref<JsonDiffSummary | null>(null)
+let sshSaveConfirmResolver: ((confirmed: boolean) => void) | null = null
 
 // 弹窗状态
 const showProviderModal = ref(false)
@@ -67,6 +63,8 @@ const showSourceModal = ref(false)
 
 // 主模型选择下拉
 const showPrimarySelector = ref(false)
+const validateRunning = ref(false)
+const validateStatus = ref('')
 
 // 新提供商表单
 const newProvider = ref({
@@ -114,6 +112,10 @@ const filteredModels = computed(() => {
 const hasMinimaxProvider = computed(() => {
   return currentConfig.value?.models?.providers?.['minimax'] !== undefined
 })
+
+const primaryModelInvalid = computed(() =>
+  isPrimaryModelPlaceholder(modelSelection.value.primary)
+)
 
 // 外部 SSH 模式：由 App.vue 管理连接，ConfigPage 直接复用
 const isExternalSsh = computed(() => props.envMode === 'ssh' && props.envSshConnected)
@@ -183,10 +185,17 @@ const selectFile = async () => {
   }
 }
 
-const saveConfig = async () => {
+const saveConfig = async (throwOnError = false) => {
   if (!currentConfig.value || !fileInfo.value) return
+  if (primaryModelInvalid.value) {
+    props.showToast('error', '主模型不能为空或 placeholder，请先修正后再保存')
+    if (throwOnError) {
+      throw new Error('primary_model_invalid')
+    }
+    return
+  }
   if (isSshMode.value) {
-    await saveSshConfig()
+    await saveSshConfig(throwOnError)
     return
   }
   loading.value = true
@@ -200,6 +209,9 @@ const saveConfig = async () => {
     props.showToast('success', '已保存')
   } catch (error) {
     props.showToast('error', `保存失败: ${error}`)
+    if (throwOnError) {
+      throw error instanceof Error ? error : new Error(String(error))
+    }
   } finally {
     loading.value = false
   }
@@ -681,54 +693,6 @@ const fixMinimaxDomestic = async () => {
   }
 }
 
-// ============================================================================
-// SSH 远程连接
-// ============================================================================
-
-const handleFingerprint = (info: FingerprintInfo, onConfirm: () => void) => {
-  sshFingerprint.value = info
-  sshFingerprintCallback.value = onConfirm
-  showFingerprintDialog.value = true
-}
-
-const confirmFingerprint = () => {
-  showFingerprintDialog.value = false
-  if (sshFingerprintCallback.value) {
-    sshFingerprintCallback.value()
-  }
-  sshFingerprint.value = null
-  sshFingerprintCallback.value = null
-}
-
-const rejectFingerprint = async () => {
-  showFingerprintDialog.value = false
-  sshFingerprint.value = null
-  sshFingerprintCallback.value = null
-  await invoke('ssh_disconnect')
-  props.showToast('error', '已拒绝连接')
-}
-
-const handleSshConnected = () => {
-  sshConnected.value = true
-  showSshModal.value = false
-  showFileBrowser.value = true
-  props.showToast('success', 'SSH 连接成功')
-}
-
-const disconnectSsh = async () => {
-  try {
-    await invoke('ssh_disconnect')
-    sshConnected.value = false
-    sshRemotePath.value = ''
-    if (isSshMode.value && fileInfo.value) {
-      fileInfo.value = { ...fileInfo.value, mode: 'remote' }
-    }
-    props.showToast('success', '已断开 SSH 连接')
-  } catch (e) {
-    props.showToast('error', `断开失败: ${e}`)
-  }
-}
-
 const loadRemoteConfig = async (remotePath: string) => {
   showFileBrowser.value = false
   loading.value = true
@@ -759,11 +723,39 @@ const loadRemoteConfig = async (remotePath: string) => {
   }
 }
 
-const saveSshConfig = async () => {
+const saveSshConfig = async (throwOnError = false) => {
   if (!currentConfig.value || !sshRemotePath.value) return
+  const json = JSON.stringify(currentConfig.value, null, 2)
+
+  try {
+    let previousRaw = '{}'
+    try {
+      previousRaw = await invoke<string>('ssh_read_file', { path: sshRemotePath.value })
+    } catch {
+      previousRaw = '{}'
+    }
+
+    const oldObj = JSON.parse(previousRaw)
+    const newObj = JSON.parse(json)
+    sshDiffSummary.value = buildJsonDiffSummary(oldObj, newObj)
+  } catch {
+    sshDiffSummary.value = buildJsonDiffSummary({}, currentConfig.value)
+  }
+
+  showSshSaveConfirm.value = true
+  const confirmed = await new Promise<boolean>((resolve) => {
+    sshSaveConfirmResolver = resolve
+  })
+
+  if (!confirmed) {
+    if (throwOnError) {
+      throw new Error('ssh_save_cancelled')
+    }
+    return
+  }
+
   loading.value = true
   try {
-    const json = JSON.stringify(currentConfig.value, null, 2)
     await invoke('ssh_write_file', {
       path: sshRemotePath.value,
       content: json,
@@ -773,8 +765,82 @@ const saveSshConfig = async () => {
     props.showToast('success', '已保存到远程服务器')
   } catch (e) {
     props.showToast('error', `远程保存失败: ${e}`)
+    if (throwOnError) {
+      throw e instanceof Error ? e : new Error(String(e))
+    }
   } finally {
     loading.value = false
+  }
+}
+
+const confirmSshSave = () => {
+  showSshSaveConfirm.value = false
+  sshSaveConfirmResolver?.(true)
+  sshSaveConfirmResolver = null
+}
+
+const cancelSshSave = () => {
+  showSshSaveConfirm.value = false
+  sshSaveConfirmResolver?.(false)
+  sshSaveConfirmResolver = null
+}
+
+const saveAndValidate = async () => {
+  if (!currentConfig.value || !fileInfo.value) return
+  if (primaryModelInvalid.value) {
+    props.showToast('error', '主模型不能为空或 placeholder，请先修正后再保存')
+    return
+  }
+
+  validateRunning.value = true
+  const mode = isSshMode.value ? 'ssh' : 'local'
+
+  try {
+    const steps = nextValidateSteps(mode)
+    for (const step of steps) {
+      if (step === 'save') {
+        validateStatus.value = '正在保存配置...'
+        await saveConfig(true)
+        continue
+      }
+      if (step === 'restart') {
+        validateStatus.value = '正在重启网关...'
+        await invoke('restart_gateway')
+        continue
+      }
+      if (step === 'health_check') {
+        validateStatus.value = '正在检查本地网关可达性...'
+        const ok = await invoke<boolean>('health_check_gateway')
+        if (!ok) {
+          throw new Error('本地网关不可达（127.0.0.1:18789）')
+        }
+        continue
+      }
+      if (step === 'save_remote') {
+        validateStatus.value = '正在保存远程配置...'
+        await saveSshConfig(true)
+        continue
+      }
+      if (step === 'remote_restart') {
+        validateStatus.value = '正在重启远程网关...'
+        await invoke('ssh_restart_gateway')
+        continue
+      }
+      if (step === 'remote_health_check') {
+        validateStatus.value = '正在检查远程网关可达性...'
+        const ok = await invoke<boolean>('ssh_health_check')
+        if (!ok) {
+          throw new Error('远程网关不可达（127.0.0.1:18789）')
+        }
+      }
+    }
+
+    props.showToast('success', '保存并验证通过')
+  } catch (error) {
+    props.showToast('error', `保存并验证失败: ${error}`)
+  } finally {
+    validateRunning.value = false
+    validateStatus.value = ''
   }
 }
 
@@ -832,119 +898,107 @@ const loadRemoteDefaultConfig = async () => {
 </script>
 
 <template>
-  <div class="h-full flex flex-col overflow-hidden bg-white">
-    <!-- 顶部栏 -->
-    <header class="flex-shrink-0 border-b border-gray-200 bg-white px-6 py-3">
-      <div class="flex items-center justify-between gap-4">
-        <div class="flex items-center gap-2">
-          <Server class="w-5 h-5 text-blue-600 flex-shrink-0" />
-          <h2 class="font-bold text-lg text-gray-900 whitespace-nowrap">模型配置</h2>
-        </div>
+  <div class="oc-config-page oc-page-root min-h-0 flex flex-col gap-3">
+        <section class="oc-panel flex-none p-4">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 class="text-xl font-semibold" style="color: var(--oc-text-primary);">模型配置</h3>
+              <p class="mt-1 text-sm" style="color: var(--oc-text-muted);">选择配置文件、调整模型并保存验证。</p>
+            </div>
 
-        <div class="flex items-center gap-2 flex-shrink-0">
-          <!-- 仅在非外部 SSH 模式下显示 SSH 连接按钮 -->
-          <template v-if="!isExternalSsh">
-            <Button v-if="!sshConnected" variant="outline" size="sm" @click="showSshModal = true" :disabled="loading">
-              <Monitor class="w-4 h-4" />
-              SSH
-            </Button>
-            <template v-else>
-              <Button variant="outline" size="sm" @click="showFileBrowser = true" :disabled="loading">
+            <div class="flex flex-wrap items-center gap-2">
+              <!-- SSH 连接由 App 全局入口统一管理，这里仅复用已建立连接 -->
+              <Button v-if="isExternalSsh" variant="outline" size="sm" @click="showFileBrowser = true" :disabled="loading">
                 <Monitor class="w-4 h-4 text-green-600" />
                 浏览远程
               </Button>
-              <Button variant="outline" size="sm" @click="disconnectSsh" :disabled="loading" class="text-red-600">
-                <WifiOff class="w-4 h-4" />
+              <Button variant="outline" size="sm" @click="selectFile" :disabled="loading">
+                <Settings class="w-4 h-4" />
+                选择文件
               </Button>
-            </template>
-          </template>
-          <!-- 外部 SSH 模式下只显示浏览远程按钮 -->
-          <Button v-if="isExternalSsh" variant="outline" size="sm" @click="showFileBrowser = true" :disabled="loading">
-            <Monitor class="w-4 h-4 text-green-600" />
-            浏览远程
-          </Button>
-          <Button variant="outline" size="sm" @click="selectFile" :disabled="loading">
-            <Settings class="w-4 h-4" />
-            选择文件
-          </Button>
-          <Button variant="outline" size="sm" @click="loadLocalConfig" :disabled="loading">
-            <FolderOpen class="w-4 h-4" />
-            本地配置
-          </Button>
-          <Button v-if="isSshMode && canSave" variant="default" size="sm" @click="saveConfig" :disabled="loading || !isDirty"
-                  class="bg-purple-600 hover:bg-purple-700 text-white">
-            <Save class="w-4 h-4" />
-            保存到远程
-          </Button>
-          <Button v-else-if="!isLocalMode && canSave" variant="outline" size="sm" @click="saveConfig" :disabled="loading || !isDirty">
-            <Save class="w-4 h-4" />
-          </Button>
-          <Button v-if="canSave && !isSshMode" variant="outline" size="sm" @click="saveConfigAs" :disabled="loading">
-            <Download class="w-4 h-4" />
-          </Button>
-          <Button v-if="currentConfig" variant="outline" size="sm" @click="showSourceModal = true">
-            <FileCode class="w-4 h-4" />
-            源文件
-          </Button>
-          <Button size="sm" @click="emit('close')" class="bg-red-500 hover:bg-red-600 text-white ml-1">
-            <X class="w-4 h-4" />
-          </Button>
-        </div>
-      </div>
+              <Button variant="outline" size="sm" @click="loadLocalConfig" :disabled="loading">
+                <FolderOpen class="w-4 h-4" />
+                本地配置
+              </Button>
+              <Button
+                v-if="canSave"
+                variant="default"
+                size="sm"
+                @click="saveAndValidate"
+                :disabled="loading || validateRunning || primaryModelInvalid"
+                class="min-w-[130px]"
+              >
+                <Loader2 v-if="validateRunning" class="w-4 h-4 animate-spin" />
+                <Save v-else class="w-4 h-4" />
+                {{ validateRunning ? '验证中...' : '保存并验证' }}
+              </Button>
+              <Button v-if="canSave && !isSshMode" variant="outline" size="sm" @click="saveConfigAs" :disabled="loading">
+                <Download class="w-4 h-4" />
+              </Button>
+              <Button v-if="currentConfig" variant="outline" size="sm" @click="showSourceModal = true">
+                <FileCode class="w-4 h-4" />
+                源文件
+              </Button>
+            </div>
+          </div>
 
-      <div v-if="fileInfo" class="flex items-center gap-2 mt-2 text-sm">
-        <span class="px-2 py-0.5 rounded text-xs font-medium"
-              :class="isLocalMode
-                ? 'bg-green-100 text-green-700'
-                : isSshMode
-                  ? 'bg-purple-100 text-purple-700'
-                  : 'bg-blue-100 text-blue-700'">
-          {{ isLocalMode ? '本地' : isSshMode ? 'SSH' : '远程' }}
-        </span>
-        <span class="text-gray-600 truncate" :title="fileInfo.path">
-          {{ fileInfo.path }}
-        </span>
-        <span v-if="isDirty && !isLocalMode" class="text-amber-500">●</span>
-        <span v-if="lastSaveTime" class="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">
-          保存于 {{ lastSaveTime }}
-        </span>
-      </div>
-    </header>
+          <div v-if="fileInfo" class="mt-3 flex flex-wrap items-center gap-2 text-sm">
+            <span class="px-2 py-0.5 rounded text-xs font-medium"
+                  :class="isLocalMode
+                    ? 'bg-green-100 text-green-700'
+                    : isSshMode
+                      ? 'bg-purple-100 text-purple-700'
+                      : 'bg-blue-100 text-blue-700'">
+              {{ isLocalMode ? '本地' : isSshMode ? 'SSH' : '远程' }}
+            </span>
+            <span class="text-gray-600 truncate" :title="fileInfo.path">
+              {{ fileInfo.path }}
+            </span>
+            <span v-if="isDirty && !isLocalMode" class="text-amber-500">●</span>
+            <span v-if="lastSaveTime" class="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">
+              保存于 {{ lastSaveTime }}
+            </span>
+            <span v-if="validateStatus" class="text-xs" style="color: var(--oc-text-muted);">
+              {{ validateStatus }}
+            </span>
+          </div>
+        </section>
 
-    <!-- 主内容区域 -->
-    <main class="flex-1 overflow-hidden p-6 bg-gray-50">
-      <div class="max-w-6xl mx-auto h-full flex flex-col">
-        <div class="grid lg:grid-cols-3 gap-4 flex-1 min-h-0">
+    <div class="min-h-0 flex-1 grid gap-3 lg:grid-cols-3">
           <!-- 左侧：当前模型配置 -->
-          <Card v-if="currentConfig" class="p-5 lg:col-span-1 overflow-auto">
+          <Card v-if="currentConfig" class="min-h-0 overflow-hidden p-5 lg:col-span-1 flex flex-col">
             <h3 class="font-semibold text-gray-900 mb-4 flex items-center gap-2">
               <ListTree class="w-5 h-5 text-blue-600" />
               模型配置
             </h3>
 
+            <div class="min-h-0 flex-1 overflow-y-auto pr-1">
             <div class="mb-4">
               <p class="text-xs text-gray-600 mb-2 font-medium">主要模型</p>
               <div class="relative primary-selector-container">
                 <Button variant="outline" size="sm" @click="showPrimarySelector = !showPrimarySelector"
                         class="w-full h-auto min-h-9 py-2 text-left justify-between"
                         :disabled="allAvailableModels.length === 0">
-                  <span v-if="modelSelection.primary" class="text-sm text-blue-700 truncate">
+                  <span v-if="modelSelection.primary" class="oc-selected-model-label text-sm truncate">
                     {{ modelSelection.primary }}
                   </span>
                   <span v-else class="text-sm text-gray-500">选择主模型</span>
                   <ChevronDown class="w-4 h-4 flex-shrink-0" :class="{ 'rotate-180': showPrimarySelector }" />
                 </Button>
-                <div v-if="showPrimarySelector" class="absolute z-20 mt-1 w-full max-h-48 overflow-auto bg-white border border-gray-200 rounded-lg shadow-lg">
+                <div v-if="showPrimarySelector" class="oc-dropdown-menu absolute z-20 mt-1 w-full max-h-48 overflow-auto">
                   <div v-for="model in availableForPrimary" :key="model.path" @click="selectPrimaryModel(model.path)"
-                       class="px-3 py-2 hover:bg-gray-50 cursor-pointer text-sm border-b last:border-b-0">
+                       class="oc-dropdown-item cursor-pointer text-sm">
                     <div class="font-medium truncate text-gray-900">{{ model.label }}</div>
                     <div class="text-xs text-gray-500 truncate">{{ model.path }}</div>
                   </div>
-                  <p v-if="availableForPrimary.length === 0" class="px-3 py-2 text-xs text-gray-500">
+                  <p v-if="availableForPrimary.length === 0" class="oc-dropdown-empty">
                     没有可选模型
                   </p>
                 </div>
               </div>
+              <p v-if="primaryModelInvalid" class="mt-2 text-xs" style="color: var(--oc-danger);">
+                当前主模型无效（placeholder），请先选择有效模型再保存。
+              </p>
             </div>
 
             <div>
@@ -966,9 +1020,9 @@ const loadRemoteDefaultConfig = async () => {
                     添加备用
                     <ChevronDown class="w-3 h-3 ml-auto" :class="{ 'rotate-180': showFallbackSelector }" />
                   </Button>
-                  <div v-if="showFallbackSelector" class="absolute z-20 mt-1 w-full max-h-48 overflow-auto bg-white border border-gray-200 rounded-lg shadow-lg">
+                  <div v-if="showFallbackSelector" class="oc-dropdown-menu absolute z-20 mt-1 w-full max-h-48 overflow-auto">
                     <div v-for="model in availableForFallback" :key="model.path" @click="addFallbackModel(model.path)"
-                         class="px-3 py-2 hover:bg-gray-50 cursor-pointer text-sm border-b last:border-b-0">
+                         class="oc-dropdown-item cursor-pointer text-sm">
                       <div class="font-medium truncate text-gray-900">{{ model.label }}</div>
                       <div class="text-xs text-gray-500 truncate">{{ model.path }}</div>
                     </div>
@@ -1003,10 +1057,11 @@ const loadRemoteDefaultConfig = async () => {
                 </Button>
               </div>
             </div>
+            </div>
           </Card>
 
           <!-- 右侧：提供商列表 -->
-          <Card class="p-5 lg:col-span-2 flex flex-col overflow-hidden">
+          <Card class="min-h-0 overflow-hidden p-5 lg:col-span-2 flex flex-col">
             <div class="flex items-center justify-between mb-4">
               <h3 class="font-semibold text-gray-900 flex items-center gap-2">
                 <Server class="w-5 h-5" />
@@ -1019,44 +1074,43 @@ const loadRemoteDefaultConfig = async () => {
               </Button>
             </div>
 
-            <div v-if="providers.length === 0" class="text-center py-8 text-gray-500">
-              <Server class="w-10 h-10 mx-auto mb-2 opacity-20" />
-              <p class="text-sm">{{ currentConfig ? '点击添加按钮创建' : '请先加载配置文件' }}</p>
-            </div>
+            <div class="min-h-0 flex-1 overflow-y-auto pr-1">
+              <div v-if="providers.length === 0" class="text-center py-8 text-gray-500">
+                <Server class="w-10 h-10 mx-auto mb-2 opacity-20" />
+                <p class="text-sm">{{ currentConfig ? '点击添加按钮创建' : '请先加载配置文件' }}</p>
+              </div>
 
-            <div v-else class="space-y-2 flex-1 overflow-auto">
-              <ProviderCard
-                v-for="provider in providers"
-                :key="provider.name"
-                :provider="provider"
-                :contains-primary="providerContainsPrimary(provider.name)"
-                @set-primary="setPrimaryModel"
-                @set-fallback="setFallbackModel"
-                @add-model="openModelModal(provider.name)"
-                @remove-model="removeModelFromProvider"
-                @edit="openEditProviderModal(provider.name)"
-                @delete="deleteProvider(provider.name)"
-              />
+              <div v-else class="space-y-2">
+                <ProviderCard
+                  v-for="provider in providers"
+                  :key="provider.name"
+                  :provider="provider"
+                  :contains-primary="providerContainsPrimary(provider.name)"
+                  @set-primary="setPrimaryModel"
+                  @set-fallback="setFallbackModel"
+                  @add-model="openModelModal(provider.name)"
+                  @remove-model="removeModelFromProvider"
+                  @edit="openEditProviderModal(provider.name)"
+                  @delete="deleteProvider(provider.name)"
+                />
+              </div>
             </div>
           </Card>
-        </div>
-      </div>
-    </main>
+    </div>
 
-    <!-- 添加提供商弹窗 -->
-    <div v-if="showProviderModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" @click.self="showProviderModal = false">
-      <Card class="w-full max-w-md p-6 m-4 bg-white">
+    <div v-if="showProviderModal" class="oc-modal-overlay" @click.self="showProviderModal = false">
+      <Card class="oc-modal-card w-full max-w-md p-6">
         <h3 class="font-semibold text-lg text-gray-900 mb-4">{{ isEditingProvider ? '编辑服务商' : '添加服务商' }}</h3>
 
         <div v-if="!isEditingProvider" class="flex rounded-lg bg-gray-100 p-1 mb-4">
           <button @click="providerModalTab = 'manual'"
             class="flex-1 px-3 py-2 text-sm rounded-md transition-colors"
-            :class="providerModalTab === 'manual' ? 'bg-white shadow-sm font-medium text-gray-900' : 'text-gray-600 hover:text-gray-900'">
+            :class="providerModalTab === 'manual' ? 'bg-white border border-gray-300 font-medium text-gray-900' : 'text-gray-600 hover:text-gray-900'">
             手动配置
           </button>
           <button @click="providerModalTab = 'paste'"
             class="flex-1 px-3 py-2 text-sm rounded-md transition-colors"
-            :class="providerModalTab === 'paste' ? 'bg-white shadow-sm font-medium text-gray-900' : 'text-gray-600 hover:text-gray-900'">
+            :class="providerModalTab === 'paste' ? 'bg-white border border-gray-300 font-medium text-gray-900' : 'text-gray-600 hover:text-gray-900'">
             粘贴配置
           </button>
         </div>
@@ -1078,7 +1132,7 @@ const loadRemoteDefaultConfig = async () => {
           <div class="flex flex-wrap items-center gap-2">
             <span class="text-xs text-gray-600">快速选择:</span>
             <button v-for="preset in chineseProviderPresets" :key="preset.name" @click="fillPreset(preset)"
-              class="px-2 py-1 text-xs rounded-md bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors">
+              class="oc-provider-preset-btn px-2 py-1 text-xs rounded-md bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors">
               {{ preset.displayName }}
             </button>
           </div>
@@ -1117,9 +1171,8 @@ const loadRemoteDefaultConfig = async () => {
       </Card>
     </div>
 
-    <!-- 添加模型弹窗 -->
-    <div v-if="showModelModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" @click.self="showModelModal = false">
-      <Card class="w-full max-w-sm p-6 m-4 bg-white">
+    <div v-if="showModelModal" class="oc-modal-overlay" @click.self="showModelModal = false">
+      <Card class="oc-modal-card w-full max-w-sm p-6">
         <h3 class="font-semibold text-lg text-gray-900 mb-4">添加模型到 {{ modelModalProvider }}</h3>
         <div class="space-y-4">
           <div>
@@ -1129,15 +1182,15 @@ const loadRemoteDefaultConfig = async () => {
                 @focus="handleDropdownOpen" placeholder="搜索模型或手动输入" @keyup.enter="addModelFromModal"
                 autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" lang="en" />
               <div v-if="showModelDropdown && (availableModels.length > 0 || loadingModels)"
-                class="absolute inset-x-0 top-full mt-1 max-h-48 overflow-auto bg-white border border-gray-200 rounded-lg shadow-lg z-10"
+                class="oc-dropdown-menu absolute inset-x-0 top-full z-10 mt-1 max-h-48 overflow-auto"
                 @click.stop>
-                <div v-if="loadingModels" class="px-3 py-2 text-xs text-gray-500">加载中...</div>
+                <div v-if="loadingModels" class="oc-dropdown-empty">加载中...</div>
                 <template v-else>
                   <div v-for="model in filteredModels" :key="model" @click="selectModelFromDropdown(model)"
-                    class="px-3 py-2 hover:bg-gray-50 cursor-pointer text-sm border-b last:border-b-0 text-gray-900">
+                    class="oc-dropdown-item cursor-pointer text-sm text-gray-900">
                     {{ model }}
                   </div>
-                  <p v-if="filteredModels.length === 0" class="px-3 py-2 text-xs text-gray-500">无匹配结果</p>
+                  <p v-if="filteredModels.length === 0" class="oc-dropdown-empty">无匹配结果</p>
                 </template>
               </div>
             </div>
@@ -1153,9 +1206,8 @@ const loadRemoteDefaultConfig = async () => {
       </Card>
     </div>
 
-    <!-- 源文件查看弹窗 -->
-    <div v-if="showSourceModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" @click.self="showSourceModal = false">
-      <Card class="w-full max-w-4xl max-h-[85vh] m-4 flex flex-col bg-white">
+    <div v-if="showSourceModal" class="oc-modal-overlay" @click.self="showSourceModal = false">
+      <Card class="oc-modal-card w-full max-w-4xl max-h-[85vh] flex flex-col">
         <div class="flex items-center justify-between p-5 border-b border-gray-200">
           <h3 class="font-semibold text-lg text-gray-900 flex items-center gap-2">
             <FileCode class="w-5 h-5" />
@@ -1174,13 +1226,117 @@ const loadRemoteDefaultConfig = async () => {
       </Card>
     </div>
 
-    <!-- SSH 连接弹窗 -->
-    <SshConnectModal v-if="showSshModal" @close="showSshModal = false" @connected="handleSshConnected" @fingerprint="handleFingerprint" />
+    <SshSaveConfirmModal
+      v-if="showSshSaveConfirm && sshDiffSummary && sshRemotePath"
+      :target-path="sshRemotePath"
+      :summary="sshDiffSummary"
+      @confirm="confirmSshSave"
+      @cancel="cancelSshSave"
+    />
 
-    <!-- SSH 指纹确认弹窗 -->
-    <SshFingerprintDialog v-if="showFingerprintDialog && sshFingerprint" :fingerprint="sshFingerprint" @confirm="confirmFingerprint" @reject="rejectFingerprint" />
-
-    <!-- 远程文件浏览器 -->
     <RemoteFileBrowser v-if="showFileBrowser" @close="showFileBrowser = false" @select="loadRemoteConfig" />
   </div>
 </template>
+
+<style scoped>
+.oc-config-page {
+  color: var(--oc-text-primary);
+  overflow: visible;
+}
+
+.oc-config-page .bg-white {
+  background: var(--oc-card) !important;
+}
+
+.oc-config-page .bg-gray-50,
+.oc-config-page .bg-gray-100 {
+  background: var(--oc-card-elevated) !important;
+}
+
+.oc-config-page .border-gray-200,
+.oc-config-page .border-gray-300 {
+  border-color: var(--oc-card-border) !important;
+}
+
+.oc-config-page .text-gray-900 {
+  color: var(--oc-text-primary) !important;
+}
+
+.oc-config-page .text-gray-700,
+.oc-config-page .text-gray-600,
+.oc-config-page .text-gray-500 {
+  color: var(--oc-text-muted) !important;
+}
+
+.oc-config-page .text-blue-600 {
+  color: var(--oc-accent) !important;
+}
+
+.oc-config-page .text-green-600 {
+  color: var(--oc-success) !important;
+}
+
+.oc-config-page .text-purple-600 {
+  color: var(--oc-accent) !important;
+}
+
+.oc-config-page .text-red-500,
+.oc-config-page .text-red-600 {
+  color: var(--oc-danger) !important;
+}
+
+.oc-config-page .text-amber-500,
+.oc-config-page .text-amber-700 {
+  color: var(--oc-warning) !important;
+}
+
+.oc-config-page .bg-green-100,
+.oc-config-page .bg-blue-100,
+.oc-config-page .bg-purple-100,
+.oc-config-page .bg-amber-50,
+.oc-config-page .bg-blue-50 {
+  background: var(--oc-item-active) !important;
+}
+
+.oc-config-page .hover\:bg-gray-50:hover,
+.oc-config-page .hover\:bg-gray-100:hover,
+.oc-config-page .hover\:bg-blue-50:hover,
+.oc-config-page .hover\:bg-blue-100:hover {
+  background: var(--oc-item-hover) !important;
+}
+
+.oc-config-page textarea {
+  border: 1px solid var(--oc-input-border);
+  border-radius: 11px;
+  background: var(--oc-input-bg);
+  color: var(--oc-text-primary);
+}
+
+.oc-config-page pre {
+  border: 1px solid var(--oc-card-border);
+  border-radius: 12px;
+  background: var(--oc-card-elevated) !important;
+  color: var(--oc-text-primary) !important;
+}
+
+.oc-config-page .rounded,
+.oc-config-page .rounded-md,
+.oc-config-page .rounded-lg {
+  border-radius: var(--radius-md) !important;
+}
+
+.oc-selected-model-label {
+  color: var(--oc-accent);
+}
+
+.oc-provider-preset-btn {
+  color: #1d4ed8 !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .oc-provider-preset-btn {
+    color: #ffffff !important;
+  }
+}
+
+</style>

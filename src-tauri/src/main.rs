@@ -4,8 +4,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 
 mod ssh;
 mod ssh_profiles;
@@ -723,6 +725,17 @@ fn restart_gateway() -> Result<String, String> {
     Ok("网关重启命令已发送".to_string())
 }
 
+/// 本地健康检查（127.0.0.1:18789）
+#[tauri::command]
+fn health_check_gateway() -> Result<bool, String> {
+    let mut addrs = "127.0.0.1:18789"
+        .to_socket_addrs()
+        .map_err(|e| format!("解析地址失败: {}", e))?;
+    let addr = addrs.next().ok_or("无法解析网关地址".to_string())?;
+    let timeout = Duration::from_secs(2);
+    Ok(TcpStream::connect_timeout(&addr, timeout).is_ok())
+}
+
 /// 打开终端并进入 TUI 模式
 #[tauri::command]
 fn open_tui() -> Result<(), String> {
@@ -827,6 +840,7 @@ fn main() {
             fetch_provider_models,
             // OpenClaw 工具
             restart_gateway,
+            health_check_gateway,
             open_tui,
             // SSH 连接
             ssh::ssh_connect,
@@ -840,6 +854,10 @@ fn main() {
             ssh::ssh_write_file,
             ssh::ssh_search_config,
             ssh::ssh_check_environment,
+            ssh::ssh_start_gateway,
+            ssh::ssh_stop_gateway,
+            ssh::ssh_restart_gateway,
+            ssh::ssh_health_check,
             // SSH 配置管理
             ssh_profiles::ssh_save_profile,
             ssh_profiles::ssh_load_profiles,
@@ -861,6 +879,16 @@ fn main() {
             installer::open_terminal_with_command,
             installer::generate_default_config,
             installer::install_gateway_service,
+            installer::start_gateway,
+            installer::stop_gateway,
+            installer::get_channel_extension_status,
+            installer::install_channel_extension,
+            installer::start_openclaw_logs_follow,
+            installer::is_openclaw_doctor_running,
+            installer::start_openclaw_doctor,
+            installer::set_feishu_channel_config,
+            installer::set_dingtalk_channel_config,
+            installer::approve_feishu_pairing,
             installer::open_web_ui,
             installer::run_doctor_fix,
         ])

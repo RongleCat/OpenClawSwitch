@@ -102,12 +102,11 @@ onMounted(searchConfig)
 </script>
 
 <template>
-  <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" @click.self="emit('close')">
-    <Card class="w-full max-w-2xl m-4 flex flex-col max-h-[80vh]">
-      <!-- 标题栏 -->
-      <div class="flex items-center justify-between p-4 border-b">
-        <h3 class="font-semibold text-lg flex items-center gap-2">
-          <FolderSearch class="w-5 h-5 text-blue-600" />
+  <div class="oc-modal-overlay" @click.self="emit('close')">
+    <Card class="oc-modal-card w-full max-w-2xl flex max-h-[80vh] flex-col">
+      <div class="flex items-center justify-between border-b p-4" style="border-color: var(--oc-divider-soft);">
+        <h3 class="flex items-center gap-2 text-lg font-semibold" style="color: var(--oc-text-primary);">
+          <FolderSearch class="w-5 h-5" style="color: var(--oc-accent);" />
           远程配置文件
         </h3>
         <Button variant="ghost" size="sm" @click="emit('close')" class="h-8 w-8 p-0">
@@ -115,13 +114,12 @@ onMounted(searchConfig)
         </Button>
       </div>
 
-      <!-- Tab 切换 -->
-      <div class="flex border-b px-4">
+      <div class="flex border-b px-4" style="border-color: var(--oc-divider-soft);">
         <button
           class="px-4 py-2 text-sm font-medium border-b-2 transition-colors"
           :class="activeTab === 'search'
-            ? 'border-blue-600 text-blue-600'
-            : 'border-transparent text-muted-foreground hover:text-foreground'"
+            ? 'border-[var(--oc-accent)] text-[var(--oc-accent)]'
+            : 'border-transparent text-[var(--oc-text-muted)] hover:text-[var(--oc-text-primary)]'"
           @click="activeTab = 'search'"
         >
           <Search class="w-3.5 h-3.5 inline mr-1" />
@@ -130,8 +128,8 @@ onMounted(searchConfig)
         <button
           class="px-4 py-2 text-sm font-medium border-b-2 transition-colors"
           :class="activeTab === 'browse'
-            ? 'border-blue-600 text-blue-600'
-            : 'border-transparent text-muted-foreground hover:text-foreground'"
+            ? 'border-[var(--oc-accent)] text-[var(--oc-accent)]'
+            : 'border-transparent text-[var(--oc-text-muted)] hover:text-[var(--oc-text-primary)]'"
           @click="activeTab = 'browse'; if (dirEntries.length === 0) browseDir('/')"
         >
           <Folder class="w-3.5 h-3.5 inline mr-1" />
@@ -139,14 +137,13 @@ onMounted(searchConfig)
         </button>
       </div>
 
-      <!-- 自动搜索 Tab -->
       <div v-if="activeTab === 'search'" class="flex-1 overflow-auto p-4">
-        <div v-if="searching" class="flex items-center justify-center py-12 text-muted-foreground">
+        <div v-if="searching" class="flex items-center justify-center py-12" style="color: var(--oc-text-muted);">
           <Loader2 class="w-5 h-5 animate-spin mr-2" />
           正在搜索配置文件...
         </div>
 
-        <div v-else-if="searchResults.length === 0" class="text-center py-12 text-muted-foreground">
+        <div v-else-if="searchResults.length === 0" class="py-12 text-center" style="color: var(--oc-text-muted);">
           <FolderSearch class="w-10 h-10 mx-auto mb-2 opacity-30" />
           <p class="text-sm">未找到配置文件</p>
           <p class="text-xs mt-1">尝试切换到"浏览目录"手动查找</p>
@@ -157,39 +154,38 @@ onMounted(searchConfig)
         </div>
 
         <div v-else class="space-y-2">
-          <p class="text-xs text-muted-foreground mb-3">
+          <p class="mb-3 text-xs" style="color: var(--oc-text-muted);">
             找到 {{ searchResults.length }} 个配置文件，点击加载
           </p>
           <div
             v-for="result in searchResults"
             :key="result.path"
-            class="flex items-center gap-3 p-3 rounded-lg border hover:bg-blue-50 dark:hover:bg-blue-950 cursor-pointer transition-colors"
+            class="flex cursor-pointer items-center gap-3 rounded-[11px] border p-3 transition-colors hover:opacity-90"
+            style="border-color: var(--oc-card-border); background: var(--oc-card);"
             @click="selectResult(result)"
           >
-            <FileJson class="w-5 h-5 text-blue-600 flex-shrink-0" />
+            <FileJson class="w-5 h-5 flex-shrink-0" style="color: var(--oc-accent);" />
             <div class="flex-1 min-w-0">
-              <div class="text-sm font-medium">{{ result.fileName }}</div>
-              <div class="text-xs text-muted-foreground truncate">{{ result.dirPath }}</div>
+              <div class="text-sm font-medium" style="color: var(--oc-text-primary);">{{ result.fileName }}</div>
+              <div class="truncate text-xs" style="color: var(--oc-text-muted);">{{ result.dirPath }}</div>
             </div>
-            <ChevronRight class="w-4 h-4 text-muted-foreground flex-shrink-0" />
+            <ChevronRight class="w-4 h-4 flex-shrink-0" style="color: var(--oc-text-muted);" />
           </div>
         </div>
       </div>
 
-      <!-- 浏览目录 Tab -->
-      <div v-if="activeTab === 'browse'" class="flex-1 overflow-hidden flex flex-col">
-        <!-- 路径导航 -->
-        <div class="px-4 py-2 border-b space-y-2">
+      <div v-if="activeTab === 'browse'" class="flex-1 overflow-visible flex flex-col">
+        <div class="space-y-2 border-b px-4 py-2" style="border-color: var(--oc-divider-soft);">
           <div class="flex items-center gap-1 text-sm overflow-x-auto">
             <Button variant="ghost" size="sm" class="h-6 px-1" @click="goBack" :disabled="pathHistory.length === 0">
               <ArrowLeft class="w-3.5 h-3.5" />
             </Button>
-            <button class="text-blue-600 hover:underline text-xs" @click="browseDir('/')">
+            <button class="text-xs hover:underline" style="color: var(--oc-accent);" @click="browseDir('/')">
               /
             </button>
             <template v-for="crumb in breadcrumbs" :key="crumb.path">
-              <ChevronRight class="w-3 h-3 text-muted-foreground flex-shrink-0" />
-              <button class="text-blue-600 hover:underline text-xs truncate max-w-[120px]" @click="browseDir(crumb.path)">
+              <ChevronRight class="w-3 h-3 flex-shrink-0" style="color: var(--oc-text-muted);" />
+              <button class="truncate text-xs hover:underline max-w-[120px]" style="color: var(--oc-accent);" @click="browseDir(crumb.path)">
                 {{ crumb.name }}
               </button>
             </template>
@@ -200,14 +196,13 @@ onMounted(searchConfig)
           </div>
         </div>
 
-        <!-- 文件列表 -->
         <div class="flex-1 overflow-auto p-2">
-          <div v-if="browsing" class="flex items-center justify-center py-8 text-muted-foreground">
+          <div v-if="browsing" class="flex items-center justify-center py-8" style="color: var(--oc-text-muted);">
             <Loader2 class="w-5 h-5 animate-spin mr-2" />
             加载中...
           </div>
 
-          <div v-else-if="dirEntries.length === 0" class="text-center py-8 text-muted-foreground">
+          <div v-else-if="dirEntries.length === 0" class="py-8 text-center" style="color: var(--oc-text-muted);">
             <Folder class="w-8 h-8 mx-auto mb-2 opacity-30" />
             <p class="text-sm">空目录</p>
           </div>
@@ -216,16 +211,16 @@ onMounted(searchConfig)
             <div
               v-for="entry in dirEntries"
               :key="entry.path"
-              class="flex items-center gap-2 px-3 py-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800 cursor-pointer text-sm"
-              :class="{ 'text-blue-600 font-medium': entry.name.endsWith('.json') }"
+              class="flex cursor-pointer items-center gap-2 rounded-[9px] px-3 py-1.5 text-sm transition-colors hover:opacity-90"
+              :style="{ background: entry.name.endsWith('.json') ? 'var(--oc-accent-soft)' : 'transparent', color: entry.name.endsWith('.json') ? 'var(--oc-accent)' : 'var(--oc-text-secondary)' }"
               @click="handleEntryClick(entry)"
             >
-              <Folder v-if="entry.isDir" class="w-4 h-4 text-amber-500 flex-shrink-0" />
-              <FileJson v-else-if="entry.name.endsWith('.json')" class="w-4 h-4 text-blue-500 flex-shrink-0" />
+              <Folder v-if="entry.isDir" class="w-4 h-4 flex-shrink-0" style="color: var(--oc-warning);" />
+              <FileJson v-else-if="entry.name.endsWith('.json')" class="w-4 h-4 flex-shrink-0" style="color: var(--oc-accent);" />
               <div v-else class="w-4 h-4 flex-shrink-0" />
               <span class="flex-1 truncate">{{ entry.name }}</span>
-              <span v-if="!entry.isDir" class="text-xs text-muted-foreground">{{ formatSize(entry.size) }}</span>
-              <ChevronRight v-if="entry.isDir" class="w-3.5 h-3.5 text-muted-foreground" />
+              <span v-if="!entry.isDir" class="text-xs" style="color: var(--oc-text-muted);">{{ formatSize(entry.size) }}</span>
+              <ChevronRight v-if="entry.isDir" class="w-3.5 h-3.5" style="color: var(--oc-text-muted);" />
             </div>
           </div>
         </div>

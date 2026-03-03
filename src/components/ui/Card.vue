@@ -9,7 +9,10 @@ interface Props {
 const props = defineProps<Props>()
 
 const classes = computed(() =>
-  cn('rounded-lg border bg-card text-card-foreground shadow-sm', props.class)
+  cn(
+    'oc-panel',
+    props.class
+  )
 )
 </script>
 
