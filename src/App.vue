@@ -52,8 +52,15 @@ const sshConnected = ref(false)
 const sshFingerprint = ref<FingerprintInfo | null>(null)
 const sshFingerprintCallback = ref<(() => void) | null>(null)
 const themeStorageKey = 'openclawswitch.theme.mode'
+const browserDefaultProfile = 'openclaw'
 const themeMode = ref<ThemeMode>('system')
 const themeModeCycle: ThemeMode[] = ['system', 'light', 'dark']
+const browserDefaultProfileEnabled = ref(false)
+const browserSettingLoading = ref(false)
+const browserSettingSaving = ref(false)
+const browserSettingError = ref('')
+const browserSettingPath = ref('')
+const browserSettingReady = ref(false)
 
 const envStatus = ref<EnvironmentStatus | null>(null)
 const configLoaded = ref(false)
@@ -146,6 +153,17 @@ const configStatusText = computed(() => {
   if (!configLoaded.value) return '未加载'
   if (!primaryModelValid.value) return '主模型无效'
   return '配置有效'
+})
+const browserSettingStatusText = computed(() => {
+  if (browserSettingLoading.value) return '加载中'
+  if (browserSettingSaving.value) return '保存中'
+  return browserDefaultProfileEnabled.value ? '已开启' : '已关闭'
+})
+const browserSettingSwitchDisabled = computed(() => {
+  if (browserSettingLoading.value || browserSettingSaving.value) return true
+  if (!openclawInstalled.value) return true
+  if (currentEnv.value.mode === 'ssh' && !sshConnected.value) return true
+  return !browserSettingReady.value
 })
 
 const isThemeMode = (raw: string | null): raw is ThemeMode =>
@@ -389,6 +407,14 @@ watch(
   { immediate: true }
 )
 
+watch(
+  [activeNav, currentEnvIndex, sshConnected, openclawInstalled],
+  async ([nav]) => {
+    if (nav !== 'settings') return
+    await loadBrowserToolSetting()
+  }
+)
+
 const handleGlobalClick = (event: MouseEvent) => {
   const target = event.target as HTMLElement
   if (!target.closest('.env-dropdown-container')) {
@@ -500,6 +526,125 @@ const applyDefaultConfig = async () => {
 const addSshEnvironment = () => {
   showEnvDropdown.value = false
   showSshModal.value = true
+}
+
+interface BrowserSettingConfigSource {
+  mode: 'local' | 'ssh'
+  path: string
+  config: OpenClawConfig
+}
+
+const resolveCurrentConfigSource = async (): Promise<BrowserSettingConfigSource> => {
+  if (currentEnv.value.mode === 'ssh') {
+    if (!sshConnected.value) {
+      throw new Error('SSH 未连接')
+    }
+    const results = await invoke<Array<{ path: string }>>('ssh_search_config')
+    if (!results.length) {
+      throw new Error('未找到远程配置文件')
+    }
+    const path = results[0].path
+    const raw = await invoke<string>('ssh_read_file', { path })
+    const config = JSON.parse(raw) as OpenClawConfig
+    return { mode: 'ssh', path, config }
+  }
+
+  const [config, info] = await invoke<[OpenClawConfig, ConfigFileInfo]>('load_default_config')
+  return {
+    mode: 'local',
+    path: info.path,
+    config,
+  }
+}
+
+const persistCurrentConfigSource = async (source: BrowserSettingConfigSource) => {
+  if (source.mode === 'ssh') {
+    await invoke('ssh_write_file', {
+      path: source.path,
+      content: JSON.stringify(source.config, null, 2),
+    })
+    return
+  }
+  await invoke('save_config', {
+    config: source.config,
+    path: source.path,
+  })
+}
+
+const readBrowserDefaultProfileEnabled = (config: OpenClawConfig) => {
+  const browserRaw = config.browser
+  if (!browserRaw || typeof browserRaw !== 'object' || Array.isArray(browserRaw)) {
+    return false
+  }
+  const defaultProfile = (browserRaw as Record<string, unknown>).defaultProfile
+  return defaultProfile === browserDefaultProfile
+}
+
+const loadBrowserToolSetting = async () => {
+  browserSettingError.value = ''
+  browserSettingPath.value = ''
+  browserSettingReady.value = false
+
+  if (!openclawInstalled.value) {
+    browserDefaultProfileEnabled.value = false
+    browserSettingError.value = '当前环境未安装 OpenClaw，无法读取配置'
+    return
+  }
+
+  if (currentEnv.value.mode === 'ssh' && !sshConnected.value) {
+    browserDefaultProfileEnabled.value = false
+    browserSettingError.value = 'SSH 未连接，无法读取远程配置'
+    return
+  }
+
+  browserSettingLoading.value = true
+  try {
+    const source = await resolveCurrentConfigSource()
+    browserSettingPath.value = source.path
+    browserDefaultProfileEnabled.value = readBrowserDefaultProfileEnabled(source.config)
+    browserSettingReady.value = true
+  } catch (error) {
+    browserDefaultProfileEnabled.value = false
+    browserSettingError.value = String(error)
+  } finally {
+    browserSettingLoading.value = false
+  }
+}
+
+const toggleBrowserDefaultProfile = async () => {
+  if (browserSettingSwitchDisabled.value) return
+
+  const next = !browserDefaultProfileEnabled.value
+  const previous = browserDefaultProfileEnabled.value
+  browserSettingSaving.value = true
+  browserSettingError.value = ''
+  browserDefaultProfileEnabled.value = next
+
+  try {
+    const source = await resolveCurrentConfigSource()
+    const browserRaw = source.config.browser
+    const browserConfig: Record<string, unknown> =
+      browserRaw && typeof browserRaw === 'object' && !Array.isArray(browserRaw)
+        ? { ...(browserRaw as Record<string, unknown>) }
+        : {}
+
+    if (next) {
+      browserConfig.defaultProfile = browserDefaultProfile
+    } else {
+      delete browserConfig.defaultProfile
+    }
+
+    source.config.browser = browserConfig
+    await persistCurrentConfigSource(source)
+    browserSettingPath.value = source.path
+    showToast('success', next ? '已开启浏览器默认 Profile（openclaw）' : '已关闭浏览器默认 Profile')
+  } catch (error) {
+    browserDefaultProfileEnabled.value = previous
+    browserSettingError.value = String(error)
+    showToast('error', `保存浏览器工具设置失败: ${error}`)
+  } finally {
+    browserSettingSaving.value = false
+  }
 }
 
 const handleFingerprint = (info: FingerprintInfo, onConfirm: () => void) => {
@@ -915,9 +1060,70 @@ onUnmounted(() => {
                 <MessageChannelsPage class="h-full min-h-0" :show-toast="showToast" />
               </div>
 
-              <div v-else class="oc-panel p-6">
-                <h3 class="text-xl font-semibold" style="color: var(--oc-text-primary);">系统设置</h3>
-                <p class="mt-1 text-sm" style="color: var(--oc-text-muted);">连接相关操作统一从顶部环境入口管理，设置页仅保留偏好项。</p>
+              <div v-else class="space-y-3">
+                <section class="oc-panel p-6">
+                  <h3 class="text-xl font-semibold" style="color: var(--oc-text-primary);">系统设置</h3>
+                  <p class="mt-1 text-sm" style="color: var(--oc-text-muted);">连接相关操作统一从顶部环境入口管理，设置页仅保留偏好项。</p>
+                </section>
+
+                <section class="oc-panel p-6">
+                  <div class="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h4 class="text-lg font-semibold" style="color: var(--oc-text-primary);">工具设置</h4>
+                      <p class="mt-1 text-sm" style="color: var(--oc-text-muted);">
+                        按当前环境修改配置文件，不覆盖你已有的其它字段。
+                      </p>
+                    </div>
+                    <span class="rounded-[10px] border px-2.5 py-1 text-xs" style="border-color: var(--oc-card-border); color: var(--oc-text-secondary);">
+                      {{ currentEnv.mode === 'ssh' ? 'SSH 环境' : '本地环境' }}
+                    </span>
+                  </div>
+
+                  <div class="mt-4 rounded-[12px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
+                    <div class="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p class="text-sm font-medium" style="color: var(--oc-text-primary);">浏览器默认 Profile</p>
+                        <p class="mt-1 text-xs" style="color: var(--oc-text-muted);">
+                          开启时写入 <code>browser.defaultProfile</code> = <code>"openclaw"</code>；关闭时仅删除 <code>defaultProfile</code>，保留 <code>browser</code> 及其它设置。
+                        </p>
+                      </div>
+                      <div class="inline-flex items-center gap-3">
+                        <button
+                          type="button"
+                          aria-label="toggle-browser-default-profile"
+                          class="relative inline-flex h-6 w-11 items-center rounded-full border transition-colors"
+                          :style="{
+                            borderColor: browserDefaultProfileEnabled ? 'color-mix(in srgb, var(--oc-success) 55%, transparent)' : 'var(--oc-card-border)',
+                            background: browserDefaultProfileEnabled
+                              ? 'color-mix(in srgb, var(--oc-success) 28%, transparent)'
+                              : 'color-mix(in srgb, var(--oc-card-elevated) 92%, transparent)'
+                          }"
+                          :disabled="browserSettingSwitchDisabled"
+                          @click="toggleBrowserDefaultProfile"
+                        >
+                          <span
+                            class="h-4 w-4 rounded-full border transition-transform"
+                            :style="{
+                              borderColor: 'var(--oc-card-border)',
+                              background: 'var(--oc-card)',
+                              transform: browserDefaultProfileEnabled ? 'translateX(22px)' : 'translateX(2px)'
+                            }"
+                          />
+                        </button>
+                        <span class="text-xs" :style="{ color: browserDefaultProfileEnabled ? 'var(--oc-success)' : 'var(--oc-text-muted)' }">
+                          {{ browserSettingStatusText }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <p v-if="browserSettingPath" class="mt-3 text-xs" style="color: var(--oc-text-muted);">
+                    配置文件：{{ browserSettingPath }}
+                  </p>
+                  <p v-if="browserSettingError" class="mt-2 text-xs" style="color: var(--oc-danger);">
+                    {{ browserSettingError }}
+                  </p>
+                </section>
               </div>
             </div>
           </div>
