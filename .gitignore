@@ -48,3 +48,5 @@ docs/plans/
 
 # Test files (work in progress)
 tests/
+src-tauri/resources/vendor/
+src-tauri/resources/windows/
