@@ -874,6 +874,7 @@ fn main() {
             installer::install_node_via_fnm,
             installer::install_openclaw,
             installer::install_git,
+            installer::uninstall_openclaw,
             installer::run_full_install,
             // 安装后配置
             installer::open_terminal_with_command,
