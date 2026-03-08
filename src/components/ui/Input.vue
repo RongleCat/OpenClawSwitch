@@ -2,17 +2,24 @@
 import { type HTMLAttributes, computed } from 'vue'
 import { cn } from '@/lib/utils'
 
+type InputSpellcheck = boolean | 'true' | 'false'
+type InputMode = 'none' | 'text' | 'tel' | 'url' | 'email' | 'numeric' | 'decimal' | 'search'
+
 interface Props {
   type?: string
   placeholder?: string
-  modelValue?: string
+  modelValue?: string | number
   class?: HTMLAttributes['class']
   autocomplete?: string
   autocorrect?: string
   autocapitalize?: string
-  spellcheck?: string | boolean
+  spellcheck?: InputSpellcheck
   lang?: string
-  inputmode?: string
+  inputmode?: InputMode
+  modelModifiers?: {
+    number?: boolean
+    trim?: boolean
+  }
 }
 
 const props = defineProps<Props>()
@@ -26,7 +33,18 @@ const classes = computed(() =>
 )
 
 const handleInput = (event: Event) => {
-  emit('update:modelValue', (event.target as HTMLInputElement).value)
+  let value = (event.target as HTMLInputElement).value
+  if (props.modelModifiers?.trim) {
+    value = value.trim()
+  }
+
+  if (props.modelModifiers?.number) {
+    const numberValue = Number.parseFloat(value)
+    emit('update:modelValue', Number.isNaN(numberValue) ? value : numberValue)
+    return
+  }
+
+  emit('update:modelValue', value)
 }
 </script>
 

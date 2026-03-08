@@ -1,16 +1,29 @@
 <script setup lang="ts">
 import { ref, watch, nextTick } from 'vue'
 import type { InstallLogEvent } from '../../types/config'
+import { shouldKeepAutoScroll } from '../../domain/terminalAutoScroll'
 
 const props = defineProps<{
   logs: InstallLogEvent[]
 }>()
 
 const containerRef = ref<HTMLDivElement>()
+const autoScrollEnabled = ref(true)
+
+const handleScroll = () => {
+  if (!containerRef.value) return
+  autoScrollEnabled.value = shouldKeepAutoScroll({
+    scrollTop: containerRef.value.scrollTop,
+    clientHeight: containerRef.value.clientHeight,
+    scrollHeight: containerRef.value.scrollHeight,
+    wasAutoScrollEnabled: autoScrollEnabled.value,
+  })
+}
 
 watch(
   () => props.logs.length,
   async () => {
+    if (!autoScrollEnabled.value) return
     await nextTick()
     if (containerRef.value) {
       containerRef.value.scrollTop = containerRef.value.scrollHeight
@@ -46,6 +59,7 @@ const levelPrefix = (level: string) => {
     ref="containerRef"
     class="h-full min-h-0 overflow-auto rounded-[12px] border p-4 font-mono text-xs"
     style="border-color: var(--oc-card-border); background: color-mix(in srgb, var(--oc-card-elevated) 88%, transparent);"
+    @scroll="handleScroll"
   >
     <div v-if="logs.length === 0" class="py-8 text-center" style="color: var(--oc-text-muted);">
       等待安装开始...

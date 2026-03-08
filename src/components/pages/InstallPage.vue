@@ -6,9 +6,9 @@ import { CheckCircle, XCircle, Loader2, Circle } from 'lucide-vue-next'
 import Button from '../ui/Button.vue'
 import Card from '../ui/Card.vue'
 import TerminalLog from '../ui/TerminalLog.vue'
-import PostInstallConfig from './PostInstallConfig.vue'
 import { getOnboardingPrimaryAction } from '../../domain/onboardingActions'
-import type { InstallLogEvent, InstallProgressEvent, InstallDownloadEvent, InstallStepTimingEvent } from '../../types/config'
+import { buildInstallSteps } from '../../domain/installSteps'
+import type { InstallLogEvent, InstallProgressEvent, InstallDownloadEvent } from '../../types/config'
 
 const props = withDefaults(
   defineProps<{
@@ -33,26 +33,17 @@ const logs = ref<InstallLogEvent[]>([])
 const installing = ref(false)
 const installComplete = ref(false)
 const installError = ref<string | null>(null)
-const showPostConfig = ref(false)
 
 // 下载进度
 const downloadProgress = ref<InstallDownloadEvent | null>(null)
 
-// 步骤耗时
-const stepTimings = ref<Map<string, InstallStepTimingEvent>>(new Map())
 
-const steps = ref([
-  { name: '环境检测', status: 'pending' as 'pending' | 'running' | 'success' | 'error', duration: 0 },
-  { name: '安装 Git', status: 'pending' as 'pending' | 'running' | 'success' | 'error', duration: 0 },
-  { name: '安装 Node.js', status: 'pending' as 'pending' | 'running' | 'success' | 'error', duration: 0 },
-  { name: '安装 OpenClaw', status: 'pending' as 'pending' | 'running' | 'success' | 'error', duration: 0 },
-  { name: '验证安装', status: 'pending' as 'pending' | 'running' | 'success' | 'error', duration: 0 },
-])
+const isWindows = navigator.userAgent.toLowerCase().includes('windows')
+const steps = ref(buildInstallSteps(isWindows))
 
 let unlistenLog: (() => void) | null = null
 let unlistenProgress: (() => void) | null = null
 let unlistenDownload: (() => void) | null = null
-let unlistenTiming: (() => void) | null = null
 
 const primaryAction = computed(() =>
   getOnboardingPrimaryAction({
@@ -70,10 +61,10 @@ onMounted(async () => {
 
   // 监听安装进度
   unlistenProgress = await listen<InstallProgressEvent>('install-progress', (event) => {
-    const { currentStep, stepName, status } = event.payload
+    const { currentStep, status } = event.payload
     const idx = currentStep - 1
     if (idx >= 0 && idx < steps.value.length) {
-      steps.value[idx].status = status as any
+      steps.value[idx].status = status as 'pending' | 'running' | 'success' | 'error'
     }
   })
 
@@ -82,32 +73,12 @@ onMounted(async () => {
     downloadProgress.value = event.payload
   })
 
-  // 监听步骤耗时
-  unlistenTiming = await listen<InstallStepTimingEvent>('install-step-timing', (event) => {
-    const timing = event.payload
-    stepTimings.value.set(timing.step, timing)
-
-    // 更新对应步骤的耗时显示
-    const stepMap: Record<string, number> = {
-      'check': 0,
-      'install_git': 1,
-      'install_fnm': 2,  // fnm 和 node 都映射到步骤 2
-      'install_node': 2,
-      'install_openclaw': 3,
-      'verify': 4,
-    }
-    const idx = stepMap[timing.step]
-    if (idx !== undefined && idx < steps.value.length) {
-      steps.value[idx].duration = timing.duration
-    }
-  })
 })
 
 onUnmounted(() => {
   unlistenLog?.()
   unlistenProgress?.()
   unlistenDownload?.()
-  unlistenTiming?.()
 })
 
 const startInstall = async () => {
@@ -127,10 +98,8 @@ const startInstall = async () => {
   installing.value = true
   installError.value = null
   installComplete.value = false
-  showPostConfig.value = false
   logs.value = []
   downloadProgress.value = null
-  stepTimings.value.clear()
 
   // 重置步骤状态
   steps.value.forEach(s => {
@@ -141,7 +110,7 @@ const startInstall = async () => {
   try {
     await invoke<string>('run_full_install')
     installComplete.value = true
-    showPostConfig.value = true
+    emit('installComplete')
   } catch (e) {
     installError.value = String(e)
   } finally {
@@ -151,10 +120,6 @@ const startInstall = async () => {
 
 const retryInstall = () => {
   startInstall()
-}
-
-const handlePostConfigComplete = () => {
-  emit('installComplete')
 }
 
 const stepIcon = (status: string) => {
@@ -197,19 +162,9 @@ const primaryActionText = computed(() => {
 </script>
 
 <template>
-  <PostInstallConfig
-    v-if="showPostConfig"
-    @complete="handlePostConfigComplete"
-  />
-
-  <div v-else class="oc-page-root flex flex-col">
-    <div class="max-w-4xl mx-auto w-full flex flex-col flex-1 min-h-0">
-      <div class="mb-6 flex-shrink-0">
-        <h2 class="text-xl font-bold" style="color: var(--oc-text-primary);">安装 OpenClaw</h2>
-        <p class="text-sm" style="color: var(--oc-text-muted);">自动检测环境并安装所有依赖</p>
-      </div>
-
-      <Card class="p-5 mb-4 flex-shrink-0">
+  <div class="oc-page-root h-full flex flex-col">
+    <div class="w-full h-full flex flex-col flex-1 min-h-0">
+      <Card class="p-5 mb-2 flex-shrink-0">
         <div class="flex items-center gap-2">
           <template v-for="(step, i) in steps" :key="i">
             <div class="flex flex-col gap-0.5">
@@ -250,11 +205,11 @@ const primaryActionText = computed(() => {
         </div>
       </Card>
 
-      <div class="flex-1 min-h-0 mb-4">
+      <div class="flex-1 min-h-0">
         <TerminalLog :logs="logs" />
       </div>
 
-      <div class="flex items-center justify-between flex-shrink-0">
+      <div class="mt-2 flex items-center justify-between flex-shrink-0">
         <div class="text-sm">
           <template v-if="installComplete">
             <span class="font-medium" style="color: var(--oc-success);">安装完成!</span>

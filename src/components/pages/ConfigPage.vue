@@ -11,13 +11,13 @@ import RemoteFileBrowser from '../RemoteFileBrowser.vue'
 import SshSaveConfirmModal from '../SshSaveConfirmModal.vue'
 import {
   Server, Settings, ListTree, Save, Download, Plus, X, ChevronDown, FolderOpen, FileCode,
-  RefreshCw, Terminal, Wrench, Hammer, Monitor, Loader2
+  RefreshCw, Terminal, Wrench, Hammer, Monitor
 } from 'lucide-vue-next'
 import type {
   OpenClawConfig, ProviderInfo, ModelSelectionInfo, ConfigFileInfo, ProviderPreset,
 } from '../../types/config'
 import { isPrimaryModelPlaceholder } from '../../domain/configValidation'
-import { nextValidateSteps } from '../../domain/validateFlow'
+import { CONFIG_PAGE_DESCRIPTION, resolveConfigPagePrimaryActionState } from '../../domain/configPageToolbar'
 import { buildJsonDiffSummary, type JsonDiffSummary } from '../../domain/jsonDiff'
 
 // ============================================================================
@@ -63,8 +63,6 @@ const showSourceModal = ref(false)
 
 // 主模型选择下拉
 const showPrimarySelector = ref(false)
-const validateRunning = ref(false)
-const validateStatus = ref('')
 
 // 新提供商表单
 const newProvider = ref({
@@ -115,6 +113,13 @@ const hasMinimaxProvider = computed(() => {
 
 const primaryModelInvalid = computed(() =>
   isPrimaryModelPlaceholder(modelSelection.value.primary)
+)
+const primaryActionState = computed(() =>
+  resolveConfigPagePrimaryActionState({
+    canSave: Boolean(canSave.value),
+    loading: loading.value,
+    primaryModelInvalid: primaryModelInvalid.value,
+  })
 )
 
 // 外部 SSH 模式：由 App.vue 管理连接，ConfigPage 直接复用
@@ -785,65 +790,6 @@ const cancelSshSave = () => {
   sshSaveConfirmResolver = null
 }
 
-const saveAndValidate = async () => {
-  if (!currentConfig.value || !fileInfo.value) return
-  if (primaryModelInvalid.value) {
-    props.showToast('error', '主模型不能为空或 placeholder，请先修正后再保存')
-    return
-  }
-
-  validateRunning.value = true
-  const mode = isSshMode.value ? 'ssh' : 'local'
-
-  try {
-    const steps = nextValidateSteps(mode)
-    for (const step of steps) {
-      if (step === 'save') {
-        validateStatus.value = '正在保存配置...'
-        await saveConfig(true)
-        continue
-      }
-      if (step === 'restart') {
-        validateStatus.value = '正在重启网关...'
-        await invoke('restart_gateway')
-        continue
-      }
-      if (step === 'health_check') {
-        validateStatus.value = '正在检查本地网关可达性...'
-        const ok = await invoke<boolean>('health_check_gateway')
-        if (!ok) {
-          throw new Error('本地网关不可达（127.0.0.1:18789）')
-        }
-        continue
-      }
-      if (step === 'save_remote') {
-        validateStatus.value = '正在保存远程配置...'
-        await saveSshConfig(true)
-        continue
-      }
-      if (step === 'remote_restart') {
-        validateStatus.value = '正在重启远程网关...'
-        await invoke('ssh_restart_gateway')
-        continue
-      }
-      if (step === 'remote_health_check') {
-        validateStatus.value = '正在检查远程网关可达性...'
-        const ok = await invoke<boolean>('ssh_health_check')
-        if (!ok) {
-          throw new Error('远程网关不可达（127.0.0.1:18789）')
-        }
-      }
-    }
-
-    props.showToast('success', '保存并验证通过')
-  } catch (error) {
-    props.showToast('error', `保存并验证失败: ${error}`)
-  } finally {
-    validateRunning.value = false
-    validateStatus.value = ''
-  }
-}
-
 const chineseProviderPresets: ProviderPreset[] = [
   { name: 'deepseek', displayName: 'DeepSeek', baseUrl: 'https://api.deepseek.com' },
   { name: 'nvidia', displayName: '英伟达', baseUrl: 'https://integrate.api.nvidia.com/v1' },
@@ -903,7 +849,7 @@ const loadRemoteDefaultConfig = async () => {
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
               <h3 class="text-xl font-semibold" style="color: var(--oc-text-primary);">模型配置</h3>
-              <p class="mt-1 text-sm" style="color: var(--oc-text-muted);">选择配置文件、调整模型并保存验证。</p>
+              <p class="mt-1 text-sm" style="color: var(--oc-text-muted);">{{ CONFIG_PAGE_DESCRIPTION }}</p>
             </div>
 
             <div class="flex flex-wrap items-center gap-2">
@@ -921,16 +867,15 @@ const loadRemoteDefaultConfig = async () => {
                 本地配置
               </Button>
               <Button
-                v-if="canSave"
+                v-if="primaryActionState.show"
                 variant="default"
                 size="sm"
-                @click="saveAndValidate"
-                :disabled="loading || validateRunning || primaryModelInvalid"
+                @click="saveConfig()"
+                :disabled="primaryActionState.disabled"
                 class="min-w-[130px]"
               >
-                <Loader2 v-if="validateRunning" class="w-4 h-4 animate-spin" />
-                <Save v-else class="w-4 h-4" />
-                {{ validateRunning ? '验证中...' : '保存并验证' }}
+                <Save class="w-4 h-4" />
+                {{ primaryActionState.label }}
               </Button>
               <Button v-if="canSave && !isSshMode" variant="outline" size="sm" @click="saveConfigAs" :disabled="loading">
                 <Download class="w-4 h-4" />
@@ -957,9 +902,6 @@ const loadRemoteDefaultConfig = async () => {
             <span v-if="isDirty && !isLocalMode" class="text-amber-500">●</span>
             <span v-if="lastSaveTime" class="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">
               保存于 {{ lastSaveTime }}
-            </span>
-            <span v-if="validateStatus" class="text-xs" style="color: var(--oc-text-muted);">
-              {{ validateStatus }}
             </span>
           </div>
         </section>

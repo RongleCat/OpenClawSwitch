@@ -7,7 +7,7 @@ import Input from './ui/Input.vue'
 import Label from './ui/Label.vue'
 import Card from './ui/Card.vue'
 import {
-  Monitor, Key, Lock, Trash2, Star, Plus, Loader2, Wifi, WifiOff, X
+  Monitor, Key, Lock, Trash2, Star, Plus, Loader2, Wifi, X
 } from 'lucide-vue-next'
 import type { SshProfile, SshAuthMode, FingerprintInfo } from '@/types/config'
 

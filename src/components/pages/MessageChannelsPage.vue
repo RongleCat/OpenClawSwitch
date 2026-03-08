@@ -8,8 +8,8 @@ import {
   Hash,
   Slack,
   MessageCircle,
-  Apple,
   Bell,
+  ChevronDown,
   ChevronRight,
   Eye,
   EyeOff,
@@ -19,13 +19,44 @@ import {
   KeyRound,
   ExternalLink,
   Download,
-  Loader2
+  Loader2,
+  Plus,
+  Trash2
 } from 'lucide-vue-next'
 import CommonInputConfirmModal from '../CommonInputConfirmModal.vue'
 import Button from '../ui/Button.vue'
 import Card from '../ui/Card.vue'
 import Input from '../ui/Input.vue'
 import TerminalLog from '../ui/TerminalLog.vue'
+import {
+  DINGTALK_CHANNEL_BINDING_KEYS,
+  DINGTALK_CHANNEL_KEY,
+  ensureDingtalkChannelConfigNode,
+  ensureDingtalkPluginAllowed,
+  mergeDingtalkEditableConfig,
+  resolveDingtalkChannelNode,
+} from '../../domain/dingtalkPlugin'
+import { messageChannelHeaderLayout } from '../../domain/messageChannelHeaderLayout'
+import {
+  MANAGED_MESSAGE_CHANNEL_IDS,
+  buildMessageChannelAccountLabel,
+  isMessageChannelAccountIdValid,
+  isMessageChannelConfigured,
+  removeMessageChannelAccountConfig,
+  saveMessageChannelAccountConfig,
+  saveMessageChannelDefaultAccountConfig,
+  saveMessageChannelPublicConfig,
+  type ManagedMessageChannelId,
+} from '../../domain/messageChannelAccounts'
+import {
+  FEISHU_PAIRING_APPROVE_COMMAND_EXAMPLE,
+  extractFeishuPairingCode,
+} from '../../domain/feishuPairing'
+import {
+  canConfigureMessageChannelBeforeInstall,
+  shouldBlockMessageChannelConfigUntilInstall,
+} from '../../domain/messageChannelInstallGate'
+import { messageChannelInstallModalLayout } from '../../domain/messageChannelInstallModalLayout'
 import type { ConfigFileInfo, InstallLogEvent, OpenClawConfig } from '../../types/config'
 
 type ChannelId =
@@ -37,7 +68,7 @@ type ChannelId =
   | 'imessage'
   | 'dingtalk'
 
-type ChannelConfigPanel = 'credentials' | 'access' | 'connection' | 'gateway' | 'advanced'
+type ChannelConfigPanel = 'credentials' | 'access' | 'connection' | 'advanced'
 type ExtensionChannelId = 'feishu' | 'dingtalk'
 type JsonRecord = Record<string, unknown>
 
@@ -132,11 +163,16 @@ interface ChannelForm {
   dingtalkDmPolicy: 'open' | 'pairing' | 'allowlist'
   dingtalkAllowFrom: string
   dingtalkGroupPolicy: 'open' | 'allowlist'
-  dingtalkGatewayToken: string
-  dingtalkGatewayPassword: string
-  dingtalkSessionTimeout: string
-  dingtalkEnableMediaUpload: boolean
-  dingtalkSystemPrompt: string
+  dingtalkName: string
+  dingtalkRobotCode: string
+  dingtalkCorpId: string
+  dingtalkAgentId: string
+  dingtalkMessageType: 'markdown' | 'card'
+  dingtalkCardTemplateId: string
+  dingtalkCardTemplateKey: string
+  dingtalkMediaUrlAllowlist: string
+  dingtalkShowThinking: boolean
+  dingtalkMediaMaxMb: string
   dingtalkDebug: boolean
 }
 
@@ -170,8 +206,6 @@ const channelList: ChannelMeta[] = [
   { id: 'telegram', name: 'Telegram', icon: Send, iconColor: 'var(--oc-accent)' },
   { id: 'discord', name: 'Discord', icon: Hash, iconColor: 'var(--oc-warning)' },
   { id: 'slack', name: 'Slack', icon: Slack, iconColor: 'var(--oc-warning)' },
-  { id: 'whatsapp', name: 'WhatsApp', icon: MessageCircle, iconColor: 'var(--oc-success)' },
-  { id: 'imessage', name: 'iMessage', icon: Apple, iconColor: 'var(--oc-text-secondary)' }
 ]
 
 const hints: Record<ChannelId, string> = {
@@ -204,7 +238,6 @@ const channelTabsMap: Record<ChannelId, Array<{ id: ChannelConfigPanel; label: s
   dingtalk: [
     { id: 'credentials', label: '凭据配置' },
     { id: 'access', label: '访问策略' },
-    { id: 'gateway', label: '网关配置' },
     { id: 'advanced', label: '高级配置' }
   ],
   slack: [
@@ -320,17 +353,35 @@ const defaultForm = (): ChannelForm => ({
   dingtalkDmPolicy: 'open',
   dingtalkAllowFrom: '',
   dingtalkGroupPolicy: 'open',
-  dingtalkGatewayToken: '',
-  dingtalkGatewayPassword: '',
-  dingtalkSessionTimeout: '1800000',
-  dingtalkEnableMediaUpload: true,
-  dingtalkSystemPrompt: '',
+  dingtalkName: '',
+  dingtalkRobotCode: '',
+  dingtalkCorpId: '',
+  dingtalkAgentId: '',
+  dingtalkMessageType: 'markdown',
+  dingtalkCardTemplateId: '',
+  dingtalkCardTemplateKey: 'content',
+  dingtalkMediaUrlAllowlist: '',
+  dingtalkShowThinking: true,
+  dingtalkMediaMaxMb: '',
   dingtalkDebug: false
 })
 
-const channelIds: ChannelId[] = channelList.map(channel => channel.id)
+const channelIds: ChannelId[] = [
+  'telegram',
+  'discord',
+  'slack',
+  'feishu',
+  'whatsapp',
+  'imessage',
+  'dingtalk',
+]
 
 interface AgentOption {
+  id: string
+  label: string
+}
+
+interface AccountOption {
   id: string
   label: string
 }
@@ -370,16 +421,15 @@ const loadStoredForms = (): Record<ChannelId, ChannelForm> => {
 const forms = ref<Record<ChannelId, ChannelForm>>(loadStoredForms())
 const availableAgents = ref<AgentOption[]>([{ id: 'default', label: 'default' }])
 const selectedAgentByChannel = ref<Record<ChannelId, string>>(buildChannelRecord(() => 'default'))
-const availableAccountsByChannel = ref<Record<ChannelId, string[]>>(
-  buildChannelRecord(() => ['default'])
+const configuredByChannel = ref<Record<ChannelId, boolean>>(buildChannelRecord(() => false))
+const availableAccountsByChannel = ref<Record<ChannelId, AccountOption[]>>(
+  buildChannelRecord(() => [{ id: 'default', label: '默认账号' }])
 )
 const selectedAccountByChannel = ref<Record<ChannelId, string>>(buildChannelRecord(() => 'default'))
 const selectedChannelId = ref<ChannelId>(channelList[0].id)
 const revealToken = ref(false)
 const revealSecret = ref(false)
 const revealSlackSigningSecret = ref(false)
-const revealGatewayToken = ref(false)
-const revealGatewayPassword = ref(false)
 const selectedPanel = ref<ChannelConfigPanel>(channelTabsMap[selectedChannelId.value][0].id)
 const extensionStatus = ref<ChannelExtensionStatus>({
   feishuInstalled: false,
@@ -393,6 +443,10 @@ const installingChannel = ref<ExtensionChannelId | null>(null)
 const showPairingCodeModal = ref(false)
 const pairingInput = ref('')
 const approvingPairing = ref(false)
+const showAccountModal = ref(false)
+const accountInput = ref('')
+const submittingAccount = ref(false)
+const showAccountSelectorDropdown = ref(false)
 
 let unlistenExtensionInstallLog: (() => void) | null = null
 let unlistenExtensionInstallState: (() => void) | null = null
@@ -401,6 +455,14 @@ const isRecord = (value: unknown): value is JsonRecord =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
 const asRecord = (value: unknown): JsonRecord | undefined => (isRecord(value) ? value : undefined)
+
+const ensureRecord = (root: JsonRecord, key: string): JsonRecord => {
+  const existing = asRecord(root[key])
+  if (existing) return existing
+  const next: JsonRecord = {}
+  root[key] = next
+  return next
+}
 
 const asString = (value: unknown): string => {
   if (typeof value === 'string') return value
@@ -574,10 +636,10 @@ const buildObjectKeysText = (value: unknown): string => {
 }
 
 const channelConfigKey = (channelId: ChannelId): string =>
-  channelId === 'dingtalk' ? 'dingtalk-connector' : channelId
+  channelId === 'dingtalk' ? DINGTALK_CHANNEL_KEY : channelId
 
 const channelBindingKeys = (channelId: ChannelId): string[] =>
-  channelId === 'dingtalk' ? ['dingtalk-connector', 'dingtalk'] : [channelId]
+  channelId === 'dingtalk' ? DINGTALK_CHANNEL_BINDING_KEYS : [channelId]
 
 const bindingChannelMatches = (channelId: ChannelId, rawChannel: unknown): boolean => {
   if (typeof rawChannel !== 'string') return false
@@ -585,14 +647,11 @@ const bindingChannelMatches = (channelId: ChannelId, rawChannel: unknown): boole
 }
 
 const getChannelConfigNode = (channelsRaw: JsonRecord, channelId: ChannelId): JsonRecord => {
-  const key = channelConfigKey(channelId)
-  // legacy alias reference: channelsRaw['dingtalk-connector'] / channelsRaw.dingtalk
-  const direct = asRecord(channelsRaw[key])
-  if (direct) return direct
   if (channelId === 'dingtalk') {
-    return asRecord(channelsRaw.dingtalk) || {}
+    return resolveDingtalkChannelNode(channelsRaw)
   }
-  return {}
+  const key = channelConfigKey(channelId)
+  return asRecord(channelsRaw[key]) || {}
 }
 
 const getAccountNode = (channelNode: JsonRecord, accountId: string): JsonRecord | undefined => {
@@ -622,32 +681,32 @@ const readChannelValue = (channelNode: JsonRecord, accountId: string, path: stri
   return undefined
 }
 
+const readSharedChannelValue = (channelNode: JsonRecord, path: string[]): unknown => {
+  const sharedValue = getPathValue(channelNode, path)
+  if (sharedValue !== undefined) return sharedValue
+
+  const defaultAccountValue = getPathValue(getAccountNode(channelNode, 'default') || {}, path)
+  if (defaultAccountValue !== undefined) return defaultAccountValue
+
+  const accounts = asRecord(channelNode.accounts)
+  if (!accounts) return undefined
+
+  for (const accountId of Object.keys(accounts)) {
+    const accountValue = getPathValue(asRecord(accounts[accountId]) || {}, path)
+    if (accountValue !== undefined) return accountValue
+  }
+
+  return undefined
+}
+
 const parseAgentOptions = (root: JsonRecord): AgentOption[] => {
-  const agentsRaw = getPathValue(root, ['agents', 'list'])
-  if (!Array.isArray(agentsRaw)) {
-    return [{ id: 'default', label: 'default' }]
-  }
-
-  const options: AgentOption[] = []
-  for (const item of agentsRaw) {
-    const agent = asRecord(item)
-    if (!agent) continue
-    const id = asString(agent.id).trim()
-    if (!id) continue
-    const name = asString(agent.name).trim()
-    options.push({
-      id,
-      label: name ? `${name} (${id})` : id
-    })
-  }
-
-  return options.length > 0 ? options : [{ id: 'default', label: 'default' }]
+  void root
+  return [{ id: 'default', label: 'default' }]
 }
 
 const parseBindings = (root: JsonRecord): JsonRecord[] => {
-  const raw = root.bindings
-  if (!Array.isArray(raw)) return []
-  return raw.filter(isRecord)
+  void root
+  return []
 }
 
 const resolveBindingAccountId = (
@@ -722,24 +781,25 @@ const getSelectedAgentId = (channelId: ChannelId): string => {
 }
 
 const getSelectedAccountId = (channelId: ChannelId): string => {
-  const options = availableAccountsByChannel.value[channelId] || ['default']
+  const options = availableAccountsByChannel.value[channelId] || [{ id: 'default', label: '默认账号' }]
   const current = selectedAccountByChannel.value[channelId]
-  if (current && options.includes(current)) return current
-  if (options.includes('default')) return 'default'
-  return options[0] || 'default'
+  if (current && options.some(option => option.id === current)) return current
+  if (options.some(option => option.id === 'default')) return 'default'
+  return options[0]?.id || 'default'
 }
 
 const isAccountModeEnabled = (channelId: ChannelId): boolean => {
   const accounts = availableAccountsByChannel.value[channelId] || []
-  return availableAgents.value.length > 1 || accounts.some(accountId => accountId !== 'default')
+  return accounts.some(account => account.id !== 'default')
 }
 
 const deriveChannelEnabledFromAccounts = (channelNode: JsonRecord): boolean | undefined => {
+  let hasExplicitAccountEnabled = typeof channelNode.enabled === 'boolean'
+  let anyEnabled = typeof channelNode.enabled === 'boolean' ? Boolean(channelNode.enabled) : false
   const accounts = asRecord(channelNode.accounts)
-  if (!accounts) return undefined
-
-  let hasExplicitAccountEnabled = false
-  let anyEnabled = false
+  if (!accounts) {
+    return hasExplicitAccountEnabled ? anyEnabled : undefined
+  }
 
   for (const accountId of Object.keys(accounts)) {
     const account = asRecord(accounts[accountId])
@@ -762,7 +822,11 @@ const syncChannelEnabledFromAccounts = (
   fallbackEnabled: boolean
 ) => {
   const key = channelConfigKey(channelId)
-  const channelNode = asRecord(getPathValue(mutable, ['channels', key])) || {}
+  const channels = asRecord(mutable.channels) || {}
+  const channelNode =
+    channelId === 'dingtalk'
+      ? resolveDingtalkChannelNode(channels)
+      : asRecord(getPathValue(mutable, ['channels', key])) || {}
   const derivedEnabled = deriveChannelEnabledFromAccounts(channelNode)
   setPathValue(
     mutable,
@@ -786,8 +850,33 @@ const applyChannelConfigToAccount = (
   if (!channelConfig) return
 
   const nextAccountId = accountId.trim() || 'default'
-  setPathValue(mutable, ['channels', key, 'accounts', nextAccountId], channelConfig)
+  if (
+    channelId === 'telegram' ||
+    channelId === 'discord' ||
+    channelId === 'slack' ||
+    channelId === 'feishu' ||
+    channelId === 'dingtalk'
+  ) {
+    saveMessageChannelAccountConfig(
+      mutable,
+      channelId as ManagedMessageChannelId,
+      nextAccountId,
+      channelConfig
+    )
+  } else {
+    setPathValue(mutable, ['channels', key, 'accounts', nextAccountId], channelConfig)
+  }
   syncChannelEnabledFromAccounts(mutable, channelId, form.enabled)
+}
+
+const buildManagedChannelDraftNode = (
+  channelId: ManagedMessageChannelId,
+  form: ChannelForm,
+  applyChannelConfig: (draft: JsonRecord, form: ChannelForm) => void
+): JsonRecord => {
+  const draft: JsonRecord = {}
+  applyChannelConfig(draft, form)
+  return asRecord(getPathValue(draft, ['channels', channelConfigKey(channelId)])) || {}
 }
 
 const upsertAgentBinding = (
@@ -796,52 +885,10 @@ const upsertAgentBinding = (
   agentId: string,
   accountId: string
 ) => {
-  const nextAgentId = agentId.trim()
-  const nextAccountId = accountId.trim()
-  if (!nextAgentId || !nextAccountId) return
-
-  const channelKey = channelConfigKey(channelId)
-  if (!Array.isArray(mutable.bindings)) {
-    mutable.bindings = []
-  }
-
-  const bindings = mutable.bindings as unknown[]
-  let targetIndex = -1
-
-  for (let index = 0; index < bindings.length; index += 1) {
-    const binding = asRecord(bindings[index])
-    if (!binding) continue
-    if (asString(binding.agentId).trim() !== nextAgentId) continue
-
-    const match = asRecord(binding.match)
-    if (!match) continue
-    if (!bindingChannelMatches(channelId, match.channel)) continue
-
-    const keys = Object.keys(match)
-    if (!keys.every(key => key === 'channel' || key === 'accountId')) continue
-
-    targetIndex = index
-    break
-  }
-
-  if (targetIndex >= 0) {
-    const binding = asRecord(bindings[targetIndex]) as JsonRecord
-    binding.agentId = nextAgentId
-    const match = asRecord(binding.match) || {}
-    match.channel = channelKey
-    match.accountId = nextAccountId
-    binding.match = match
-    bindings[targetIndex] = binding
-    return
-  }
-
-  bindings.push({
-    agentId: nextAgentId,
-    match: {
-      channel: channelKey,
-      accountId: nextAccountId
-    }
-  })
+  void mutable
+  void channelId
+  void agentId
+  void accountId
 }
 
 watch(
@@ -858,8 +905,7 @@ watch(selectedChannelId, () => {
   revealToken.value = false
   revealSecret.value = false
   revealSlackSigningSecret.value = false
-  revealGatewayToken.value = false
-  revealGatewayPassword.value = false
+  showAccountSelectorDropdown.value = false
   void syncChannelsFromConfig()
 })
 
@@ -873,53 +919,150 @@ const installingChannelName = computed(() =>
 
 const currentForm = computed(() => forms.value[selectedChannelId.value])
 
-const currentAgentOptions = computed(() => availableAgents.value)
-const showAgentSelector = computed(() => currentAgentOptions.value.length > 1)
-const currentAgentId = computed(() => getSelectedAgentId(selectedChannelId.value))
-
 const currentAccountOptions = computed(
-  () => availableAccountsByChannel.value[selectedChannelId.value] || ['default']
+  () => availableAccountsByChannel.value[selectedChannelId.value] || [{ id: 'default', label: '默认账号' }]
 )
-const showAccountSelector = computed(
-  () => currentAccountOptions.value.length > 1 || showAgentSelector.value
-)
+const showAccountSelector = computed(() => currentAccountOptions.value.length > 0)
 const currentAccountId = computed(() => getSelectedAccountId(selectedChannelId.value))
+const isManagedChannel = (channelId: ChannelId): channelId is ManagedMessageChannelId =>
+  MANAGED_MESSAGE_CHANNEL_IDS.includes(channelId as ManagedMessageChannelId)
+const publicPanelTabs = computed(() =>
+  panelTabs.value
+    .filter(tab => tab.id !== 'credentials')
+    .map(tab => ({
+      ...tab,
+      label: `公共${tab.label}`,
+    }))
+)
+const currentAccountTabLabel = computed(() => {
+  const accountLabel = currentAccountId.value === 'default' ? '默认账号' : currentAccountId.value
+  return `账号独立配置 · ${accountLabel}`
+})
+const currentChannelConfigRootPath = computed(
+  () => `channels.${channelConfigKey(selectedChannelId.value)}`
+)
+const currentAccountConfigPath = computed(() =>
+  currentAccountId.value === 'default'
+    ? currentChannelConfigRootPath.value
+    : `${currentChannelConfigRootPath.value}.accounts.${currentAccountId.value}`
+)
+const currentPanelScopeHint = computed(() =>
+  selectedPanel.value === 'credentials'
+    ? `当前为账号独立配置，保存到 ${currentAccountConfigPath.value}。`
+    : `当前为公共配置，影响当前渠道所有账号，保存到 ${currentChannelConfigRootPath.value}。`
+)
+const saveButtonLabel = computed(() =>
+  selectedPanel.value === 'credentials' ? '保存账号配置' : '保存公共配置'
+)
+const accountScopedFieldPath = (field: string) => `${currentAccountConfigPath.value}.${field}`
 
-const handleAgentSelectionChange = async (value: string) => {
-  const channelId = selectedChannelId.value
-  const next = value.trim()
-  if (!next) return
-  selectedAgentByChannel.value[channelId] = next
-  await syncChannelsFromConfig()
+const toggleAccountSelectorDropdown = () => {
+  if (!showAccountSelector.value || !canConfigureCurrentChannel.value) return
+  selectedPanel.value = 'credentials'
+  showAccountSelectorDropdown.value = !showAccountSelectorDropdown.value
 }
 
 const handleAccountSelectionChange = async (value: string) => {
   const channelId = selectedChannelId.value
   const next = value.trim()
   if (!next) return
+  selectedPanel.value = 'credentials'
   selectedAccountByChannel.value[channelId] = next
+  showAccountSelectorDropdown.value = false
   await syncChannelsFromConfig()
 }
 
+const handleAccountInputChange = (value: string) => {
+  accountInput.value = value
+}
+
+const openAccountModal = () => {
+  accountInput.value = ''
+  selectedPanel.value = 'credentials'
+  showAccountSelectorDropdown.value = false
+  showAccountModal.value = true
+}
+
+const closeAccountModal = () => {
+  if (submittingAccount.value) return
+  showAccountModal.value = false
+}
+
+const submitAccount = async () => {
+  const channelId = selectedChannelId.value
+  const nextAccountId = accountInput.value.trim()
+  if (!nextAccountId) return
+
+  if (!isMessageChannelAccountIdValid(nextAccountId)) {
+    props.showToast('error', '账号 ID 仅支持字母、数字、点、下划线和中划线')
+    return
+  }
+
+  if (availableAccountsByChannel.value[channelId]?.some(option => option.id === nextAccountId)) {
+    props.showToast('error', `账号 ${nextAccountId} 已存在`)
+    return
+  }
+
+  const applyChannelConfig =
+    channelId === 'telegram'
+      ? applyTelegramConfig
+      : channelId === 'discord'
+        ? applyDiscordConfig
+        : channelId === 'slack'
+          ? applySlackConfig
+          : channelId === 'feishu'
+            ? applyFeishuConfig
+            : applyDingtalkConfig
+
+  submittingAccount.value = true
+  try {
+    await persistConfigMutation(mutable => {
+      if (channelId === 'dingtalk') {
+        ensureDingtalkPluginAllowed(mutable)
+      }
+      applyChannelConfigToAccount(mutable, channelId, nextAccountId, currentForm.value, applyChannelConfig)
+    })
+    selectedAccountByChannel.value[channelId] = nextAccountId
+    showAccountModal.value = false
+    accountInput.value = ''
+    await syncChannelsFromConfig()
+    props.showToast('success', `已新增账号 ${nextAccountId}`)
+  } catch (error) {
+    props.showToast('error', String(error))
+  } finally {
+    submittingAccount.value = false
+  }
+}
+
+const removeSelectedAccount = async () => {
+  const channelId = selectedChannelId.value
+  const accountId = getSelectedAccountId(channelId)
+  if (accountId === 'default') return
+  if (!window.confirm(`确认删除账号 ${accountId}？`)) return
+
+  try {
+    await persistConfigMutation(mutable => {
+      if (
+        channelId === 'telegram' ||
+        channelId === 'discord' ||
+        channelId === 'slack' ||
+        channelId === 'feishu' ||
+        channelId === 'dingtalk'
+      ) {
+        removeMessageChannelAccountConfig(mutable, channelId as ManagedMessageChannelId, accountId)
+      }
+    })
+    selectedAccountByChannel.value[channelId] = 'default'
+    showAccountSelectorDropdown.value = false
+    await syncChannelsFromConfig()
+    props.showToast('success', `已删除账号 ${accountId}`)
+  } catch (error) {
+    props.showToast('error', String(error))
+  }
+}
+
 const isConfigured = (id: ChannelId) => {
-  const form = forms.value[id]
-  if (id === 'telegram' || id === 'discord') {
-    return form.token.trim().length > 0
-  }
-  if (id === 'slack') {
-    return form.slackBotToken.trim().length > 0
-  }
-  if (id === 'whatsapp') {
-    return (
-      form.whatsappSessionDir.trim().length > 0 ||
-      form.whatsappWebhookPath.trim().length > 0 ||
-      form.whatsappUseRemoteAuth
-    )
-  }
-  if (id === 'imessage') {
-    return form.imessageCliPath.trim().length > 0 || form.imessageDbPath.trim().length > 0
-  }
-  return form.token.trim().length > 0 && form.userId.trim().length > 0
+  return Boolean(configuredByChannel.value[id])
 }
 
 const isExtensionChannel = (id: ChannelId): id is ExtensionChannelId =>
@@ -932,10 +1075,21 @@ const selectedExtensionInstalled = computed(() => {
 })
 
 const selectedNeedsExtensionInstall = computed(() =>
-  isExtensionChannel(selectedChannelId.value) && !selectedExtensionInstalled.value
+  shouldBlockMessageChannelConfigUntilInstall({
+    channelId: selectedChannelId.value,
+    isExtensionChannel: isExtensionChannel(selectedChannelId.value),
+    installed: selectedExtensionInstalled.value,
+  })
 )
 
-const canConfigureCurrentChannel = computed(() => !selectedNeedsExtensionInstall.value)
+const canConfigureCurrentChannel = computed(() => {
+  if (!isExtensionChannel(selectedChannelId.value)) return true
+
+  return (
+    selectedExtensionInstalled.value ||
+    canConfigureMessageChannelBeforeInstall(selectedChannelId.value)
+  )
+})
 const enabledLabel = computed(() => (currentForm.value.enabled ? '已启用' : '已停用'))
 
 const loadLocalConfig = async () => invoke<[OpenClawConfig, ConfigFileInfo]>('load_default_config')
@@ -1192,40 +1346,44 @@ const applyFeishuConfig = (mutable: JsonRecord, form: ChannelForm) => {
 }
 
 const applyDingtalkConfig = (mutable: JsonRecord, form: ChannelForm) => {
-  setPathValue(mutable, ['channels', 'dingtalk-connector', 'enabled'], form.enabled)
-  setStringOrDelete(mutable, ['channels', 'dingtalk-connector', 'clientId'], form.token)
-  setStringOrDelete(mutable, ['channels', 'dingtalk-connector', 'clientSecret'], form.userId)
-
-  setPathValue(mutable, ['channels', 'dingtalk-connector', 'dmPolicy'], form.dingtalkDmPolicy)
-  setListOrDelete(mutable, ['channels', 'dingtalk-connector', 'allowFrom'], form.dingtalkAllowFrom)
-  setPathValue(mutable, ['channels', 'dingtalk-connector', 'groupPolicy'], form.dingtalkGroupPolicy)
-
-  setStringOrDelete(mutable, ['channels', 'dingtalk-connector', 'gatewayToken'], form.dingtalkGatewayToken)
-  setStringOrDelete(
-    mutable,
-    ['channels', 'dingtalk-connector', 'gatewayPassword'],
-    form.dingtalkGatewayPassword
-  )
-  setNumberOrDelete(
-    mutable,
-    ['channels', 'dingtalk-connector', 'sessionTimeout'],
-    form.dingtalkSessionTimeout,
-    parsePositiveInt
-  )
-  setPathValue(
-    mutable,
-    ['channels', 'dingtalk-connector', 'enableMediaUpload'],
-    form.dingtalkEnableMediaUpload
-  )
-
-  const systemPrompt = form.dingtalkSystemPrompt.trim()
-  if (systemPrompt) {
-    setPathValue(mutable, ['channels', 'dingtalk-connector', 'systemPrompt'], systemPrompt)
-  } else {
-    deletePathValue(mutable, ['channels', 'dingtalk-connector', 'systemPrompt'])
+  ensureDingtalkPluginAllowed(mutable)
+  const channels = ensureRecord(mutable, 'channels')
+  const dingtalkConfig = ensureDingtalkChannelConfigNode(channels)
+  const nextConfig: JsonRecord = {
+    enabled: form.enabled,
+    dmPolicy: form.dingtalkDmPolicy,
+    groupPolicy: form.dingtalkGroupPolicy,
+    debug: form.dingtalkDebug,
+    showThinking: form.dingtalkShowThinking,
+    messageType: form.dingtalkMessageType,
+    cardTemplateKey: form.dingtalkCardTemplateKey.trim() || 'content',
   }
 
-  setPathValue(mutable, ['channels', 'dingtalk-connector', 'debug'], form.dingtalkDebug)
+  const name = form.dingtalkName.trim()
+  const clientId = form.token.trim()
+  const clientSecret = form.userId.trim()
+  const robotCode = form.dingtalkRobotCode.trim()
+  const corpId = form.dingtalkCorpId.trim()
+  const agentId = form.dingtalkAgentId.trim()
+  const cardTemplateId = form.dingtalkCardTemplateId.trim()
+  const allowFrom = parseListText(form.dingtalkAllowFrom)
+  const mediaUrlAllowlist = parseListText(form.dingtalkMediaUrlAllowlist)
+  const mediaMaxMb = parsePositiveNumber(form.dingtalkMediaMaxMb)
+
+  if (name) nextConfig.name = name
+  if (clientId) nextConfig.clientId = clientId
+  if (clientSecret) nextConfig.clientSecret = clientSecret
+  if (robotCode) nextConfig.robotCode = robotCode
+  if (corpId) nextConfig.corpId = corpId
+  if (agentId) nextConfig.agentId = agentId
+  if (cardTemplateId) nextConfig.cardTemplateId = cardTemplateId
+  if (allowFrom.length > 0) nextConfig.allowFrom = allowFrom
+  if (mediaUrlAllowlist.length > 0) nextConfig.mediaUrlAllowlist = mediaUrlAllowlist
+  if (typeof mediaMaxMb === 'number') nextConfig.mediaMaxMb = mediaMaxMb
+
+  channels[DINGTALK_CHANNEL_KEY] = {
+    ...mergeDingtalkEditableConfig(dingtalkConfig, nextConfig),
+  }
 }
 
 const syncChannelsFromConfig = async () => {
@@ -1240,7 +1398,40 @@ const syncChannelsFromConfig = async () => {
     for (const channelId of channelIds) {
       const channelNode = getChannelConfigNode(channelsRaw, channelId)
       const accountIds = collectChannelAccountIds(channelNode, bindings, channelId, agentOptions)
-      availableAccountsByChannel.value[channelId] = accountIds
+      availableAccountsByChannel.value[channelId] = accountIds.map(accountId => {
+        const accountNode = accountId === 'default' ? channelNode : getAccountNode(channelNode, accountId)
+        const label =
+          channelId === 'telegram' ||
+          channelId === 'discord' ||
+          channelId === 'slack' ||
+          channelId === 'feishu' ||
+          channelId === 'dingtalk'
+            ? buildMessageChannelAccountLabel(
+                channelId as ManagedMessageChannelId,
+                accountId,
+                accountNode
+              )
+            : accountId
+
+        return {
+          id: accountId,
+          label,
+        }
+      })
+      if (
+        channelId === 'telegram' ||
+        channelId === 'discord' ||
+        channelId === 'slack' ||
+        channelId === 'feishu' ||
+        channelId === 'dingtalk'
+      ) {
+        configuredByChannel.value[channelId] = isMessageChannelConfigured(
+          channelId as ManagedMessageChannelId,
+          channelNode
+        )
+      } else {
+        configuredByChannel.value[channelId] = false
+      }
 
       const previousAgent = selectedAgentByChannel.value[channelId]
       const nextAgent = agentOptions.some(agent => agent.id === previousAgent)
@@ -1265,83 +1456,86 @@ const syncChannelsFromConfig = async () => {
     }
 
     const telegram = getChannelConfigNode(channelsRaw, 'telegram')
-    const readTelegram = (path: string[]) =>
+    const readTelegramAccount = (path: string[]) =>
       readChannelValue(telegram, getSelectedAccountId('telegram'), path)
-    forms.value.telegram.token = asString(readTelegram(['botToken']))
+    const readTelegramShared = (path: string[]) => readSharedChannelValue(telegram, path)
+    forms.value.telegram.token = asString(readTelegramAccount(['botToken']))
     forms.value.telegram.telegramDmPolicy = enumOrDefault(
-      readTelegram(['dmPolicy']),
+      readTelegramShared(['dmPolicy']),
       ['pairing', 'allowlist', 'open', 'disabled'],
       'pairing'
     )
-    forms.value.telegram.telegramAllowFrom = listToText(readTelegram(['allowFrom']))
+    forms.value.telegram.telegramAllowFrom = listToText(readTelegramShared(['allowFrom']))
     forms.value.telegram.telegramGroupPolicy = enumOrDefault(
-      readTelegram(['groupPolicy']),
+      readTelegramShared(['groupPolicy']),
       ['allowlist', 'open', 'disabled'],
       'allowlist'
     )
-    forms.value.telegram.telegramGroupAllowFrom = listToText(readTelegram(['groupAllowFrom']))
+    forms.value.telegram.telegramGroupAllowFrom = listToText(readTelegramShared(['groupAllowFrom']))
     forms.value.telegram.telegramReplyToMode = enumOrDefault(
-      readTelegram(['replyToMode']),
+      readTelegramShared(['replyToMode']),
       ['off', 'first', 'all'],
       'off'
     )
-    forms.value.telegram.telegramDefaultTo = asString(readTelegram(['defaultTo']))
-    forms.value.telegram.telegramGroups = buildObjectKeysText(readTelegram(['groups']))
+    forms.value.telegram.telegramDefaultTo = asString(readTelegramShared(['defaultTo']))
+    forms.value.telegram.telegramGroups = buildObjectKeysText(readTelegramShared(['groups']))
 
     const discord = getChannelConfigNode(channelsRaw, 'discord')
-    const readDiscord = (path: string[]) =>
+    const readDiscordAccount = (path: string[]) =>
       readChannelValue(discord, getSelectedAccountId('discord'), path)
-    forms.value.discord.token = asString(readDiscord(['token']))
+    const readDiscordShared = (path: string[]) => readSharedChannelValue(discord, path)
+    forms.value.discord.token = asString(readDiscordAccount(['token']))
     forms.value.discord.discordDmPolicy = enumOrDefault(
-      readDiscord(['dm', 'policy']) ?? readDiscord(['dmPolicy']),
+      readDiscordShared(['dm', 'policy']) ?? readDiscordShared(['dmPolicy']),
       ['pairing', 'allowlist', 'open', 'disabled'],
       'pairing'
     )
     forms.value.discord.discordAllowFrom = listToText(
-      readDiscord(['dm', 'allowFrom']) ?? readDiscord(['allowFrom'])
+      readDiscordShared(['dm', 'allowFrom']) ?? readDiscordShared(['allowFrom'])
     )
     forms.value.discord.discordGroupPolicy = enumOrDefault(
-      readDiscord(['groupPolicy']),
+      readDiscordShared(['groupPolicy']),
       ['allowlist', 'open', 'disabled'],
       'allowlist'
     )
-    forms.value.discord.discordGuildChannels = buildDiscordGuildChannelsText(readDiscord(['guilds']))
+    forms.value.discord.discordGuildChannels = buildDiscordGuildChannelsText(readDiscordShared(['guilds']))
     forms.value.discord.discordReplyToMode = enumOrDefault(
-      readDiscord(['replyToMode']),
+      readDiscordShared(['replyToMode']),
       ['off', 'first', 'all'],
       'off'
     )
 
     const slack = getChannelConfigNode(channelsRaw, 'slack')
-    const readSlack = (path: string[]) => readChannelValue(slack, getSelectedAccountId('slack'), path)
-    forms.value.slack.slackMode = enumOrDefault(readSlack(['mode']), ['http', 'socket'], 'http')
-    forms.value.slack.slackBotToken = asString(readSlack(['botToken']))
-    forms.value.slack.slackAppToken = asString(readSlack(['appToken']))
-    forms.value.slack.slackSigningSecret = asString(readSlack(['signingSecret']))
-    forms.value.slack.slackWebhookPort = asString(readSlack(['webhookPort']))
-    forms.value.slack.slackWebhookPath = asString(readSlack(['webhookPath'])) || '/webhooks/slack'
+    const readSlackAccount = (path: string[]) => readChannelValue(slack, getSelectedAccountId('slack'), path)
+    const readSlackShared = (path: string[]) => readSharedChannelValue(slack, path)
+    forms.value.slack.slackMode = enumOrDefault(readSlackShared(['mode']), ['http', 'socket'], 'http')
+    forms.value.slack.slackBotToken = asString(readSlackAccount(['botToken']))
+    forms.value.slack.slackAppToken = asString(readSlackAccount(['appToken']))
+    forms.value.slack.slackSigningSecret = asString(readSlackAccount(['signingSecret']))
+    forms.value.slack.slackWebhookPort = asString(readSlackShared(['webhookPort']))
+    forms.value.slack.slackWebhookPath = asString(readSlackShared(['webhookPath'])) || '/webhooks/slack'
     forms.value.slack.slackDmPolicy = enumOrDefault(
-      readSlack(['dmPolicy']),
+      readSlackShared(['dmPolicy']),
       ['pairing', 'allowlist', 'open', 'disabled'],
       'pairing'
     )
-    forms.value.slack.slackAllowFrom = listToText(readSlack(['allowFrom']))
+    forms.value.slack.slackAllowFrom = listToText(readSlackShared(['allowFrom']))
     forms.value.slack.slackGroupPolicy = enumOrDefault(
-      readSlack(['groupPolicy']),
+      readSlackShared(['groupPolicy']),
       ['allowlist', 'open', 'disabled'],
       'allowlist'
     )
-    forms.value.slack.slackChannels = buildObjectKeysText(readSlack(['channels']))
+    forms.value.slack.slackChannels = buildObjectKeysText(readSlackShared(['channels']))
     forms.value.slack.slackReplyToMode = enumOrDefault(
-      readSlack(['replyToMode']),
+      readSlackShared(['replyToMode']),
       ['off', 'first', 'all'],
       'off'
     )
-    forms.value.slack.slackDefaultTo = asString(readSlack(['defaultTo']))
+    forms.value.slack.slackDefaultTo = asString(readSlackShared(['defaultTo']))
     forms.value.slack.slackRequireMention =
-      typeof readSlack(['requireMention']) === 'boolean' ? (readSlack(['requireMention']) as boolean) : true
-    forms.value.slack.slackTextChunkLimit = asString(readSlack(['textChunkLimit']))
-    forms.value.slack.slackChunkMode = asString(readSlack(['chunkMode'])) || 'sentence'
+      typeof readSlackShared(['requireMention']) === 'boolean' ? (readSlackShared(['requireMention']) as boolean) : true
+    forms.value.slack.slackTextChunkLimit = asString(readSlackShared(['textChunkLimit']))
+    forms.value.slack.slackChunkMode = asString(readSlackShared(['chunkMode'])) || 'sentence'
 
     const whatsapp = getChannelConfigNode(channelsRaw, 'whatsapp')
     const readWhatsApp = (path: string[]) =>
@@ -1410,75 +1604,85 @@ const syncChannelsFromConfig = async () => {
     forms.value.imessage.imessageChunkMode = asString(readIMessage(['chunkMode'])) || 'sentence'
 
     const feishu = getChannelConfigNode(channelsRaw, 'feishu')
-    const readFeishu = (path: string[]) => readChannelValue(feishu, getSelectedAccountId('feishu'), path)
-    const feishuDynamic = asRecord(readFeishu(['dynamicAgentCreation'])) || {}
-    forms.value.feishu.token = asString(readFeishu(['appId']))
-    forms.value.feishu.userId = asString(readFeishu(['appSecret']))
-    forms.value.feishu.feishuDomain = asString(readFeishu(['domain'])) || 'feishu'
+    const readFeishuAccount = (path: string[]) => readChannelValue(feishu, getSelectedAccountId('feishu'), path)
+    const readFeishuShared = (path: string[]) => readSharedChannelValue(feishu, path)
+    const feishuDynamic = asRecord(readFeishuShared(['dynamicAgentCreation'])) || {}
+    forms.value.feishu.token = asString(readFeishuAccount(['appId']))
+    forms.value.feishu.userId = asString(readFeishuAccount(['appSecret']))
+    forms.value.feishu.feishuDomain = asString(readFeishuShared(['domain'])) || 'feishu'
     forms.value.feishu.feishuConnectionMode = enumOrDefault(
-      readFeishu(['connectionMode']),
+      readFeishuShared(['connectionMode']),
       ['websocket', 'webhook'],
       'websocket'
     )
     forms.value.feishu.feishuDmPolicy = enumOrDefault(
-      readFeishu(['dmPolicy']),
+      readFeishuShared(['dmPolicy']),
       ['pairing', 'allowlist', 'open'],
       'pairing'
     )
-    forms.value.feishu.feishuAllowFrom = listToText(readFeishu(['allowFrom']))
+    forms.value.feishu.feishuAllowFrom = listToText(readFeishuShared(['allowFrom']))
     forms.value.feishu.feishuGroupPolicy = enumOrDefault(
-      readFeishu(['groupPolicy']),
+      readFeishuShared(['groupPolicy']),
       ['allowlist', 'open', 'disabled'],
       'allowlist'
     )
-    forms.value.feishu.feishuGroupAllowFrom = listToText(readFeishu(['groupAllowFrom']))
+    forms.value.feishu.feishuGroupAllowFrom = listToText(readFeishuShared(['groupAllowFrom']))
     forms.value.feishu.feishuGroupCommandMentionBypass = enumOrDefault(
-      readFeishu(['groupCommandMentionBypass']),
+      readFeishuShared(['groupCommandMentionBypass']),
       ['single_bot', 'never', 'always'],
       'single_bot'
     )
-    forms.value.feishu.feishuWebhookPath = asString(readFeishu(['webhookPath'])) || '/feishu/events'
-    forms.value.feishu.feishuWebhookPort = asString(readFeishu(['webhookPort']))
-    forms.value.feishu.feishuEncryptKey = asString(readFeishu(['encryptKey']))
-    forms.value.feishu.feishuVerificationToken = asString(readFeishu(['verificationToken']))
+    forms.value.feishu.feishuWebhookPath = asString(readFeishuShared(['webhookPath'])) || '/feishu/events'
+    forms.value.feishu.feishuWebhookPort = asString(readFeishuShared(['webhookPort']))
+    forms.value.feishu.feishuEncryptKey = asString(readFeishuShared(['encryptKey']))
+    forms.value.feishu.feishuVerificationToken = asString(readFeishuShared(['verificationToken']))
     forms.value.feishu.feishuRenderMode = enumOrDefault(
-      readFeishu(['renderMode']),
+      readFeishuShared(['renderMode']),
       ['auto', 'raw', 'card'],
       'auto'
     )
-    forms.value.feishu.feishuMediaMaxMb = asString(readFeishu(['mediaMaxMb']))
+    forms.value.feishu.feishuMediaMaxMb = asString(readFeishuShared(['mediaMaxMb']))
     forms.value.feishu.feishuDynamicEnabled = Boolean(feishuDynamic.enabled)
     forms.value.feishu.feishuDynamicWorkspaceTemplate = asString(feishuDynamic.workspaceTemplate)
     forms.value.feishu.feishuDynamicAgentDirTemplate = asString(feishuDynamic.agentDirTemplate)
     forms.value.feishu.feishuDynamicMaxAgents = asString(feishuDynamic.maxAgents)
 
     const dingtalk = getChannelConfigNode(channelsRaw, 'dingtalk')
-    const readDingtalk = (path: string[]) =>
+    const readDingtalkAccount = (path: string[]) =>
       readChannelValue(dingtalk, getSelectedAccountId('dingtalk'), path)
-    forms.value.dingtalk.token = asString(readDingtalk(['clientId']))
-    forms.value.dingtalk.userId = asString(readDingtalk(['clientSecret']))
+    const readDingtalkShared = (path: string[]) => readSharedChannelValue(dingtalk, path)
+    forms.value.dingtalk.token = asString(readDingtalkAccount(['clientId']))
+    forms.value.dingtalk.userId = asString(readDingtalkAccount(['clientSecret']))
     forms.value.dingtalk.dingtalkDmPolicy = enumOrDefault(
-      readDingtalk(['dmPolicy']),
+      readDingtalkShared(['dmPolicy']),
       ['open', 'pairing', 'allowlist'],
       'open'
     )
-    forms.value.dingtalk.dingtalkAllowFrom = listToText(readDingtalk(['allowFrom']))
+    forms.value.dingtalk.dingtalkAllowFrom = listToText(readDingtalkShared(['allowFrom']))
     forms.value.dingtalk.dingtalkGroupPolicy = enumOrDefault(
-      readDingtalk(['groupPolicy']),
+      readDingtalkShared(['groupPolicy']),
       ['open', 'allowlist'],
       'open'
     )
-    forms.value.dingtalk.dingtalkGatewayToken = asString(readDingtalk(['gatewayToken']))
-    forms.value.dingtalk.dingtalkGatewayPassword = asString(readDingtalk(['gatewayPassword']))
-    forms.value.dingtalk.dingtalkSessionTimeout = asString(
-      readDingtalk(['sessionTimeout']) || 1800000
+    forms.value.dingtalk.dingtalkName = asString(readDingtalkAccount(['name']))
+    forms.value.dingtalk.dingtalkRobotCode = asString(readDingtalkAccount(['robotCode']))
+    forms.value.dingtalk.dingtalkCorpId = asString(readDingtalkAccount(['corpId']))
+    forms.value.dingtalk.dingtalkAgentId = asString(readDingtalkAccount(['agentId']))
+    forms.value.dingtalk.dingtalkMessageType = enumOrDefault(
+      readDingtalkShared(['messageType']),
+      ['markdown', 'card'],
+      'markdown'
     )
-    forms.value.dingtalk.dingtalkEnableMediaUpload =
-      typeof readDingtalk(['enableMediaUpload']) === 'boolean'
-        ? (readDingtalk(['enableMediaUpload']) as boolean)
+    forms.value.dingtalk.dingtalkCardTemplateId = asString(readDingtalkShared(['cardTemplateId']))
+    forms.value.dingtalk.dingtalkCardTemplateKey =
+      asString(readDingtalkShared(['cardTemplateKey'])) || 'content'
+    forms.value.dingtalk.dingtalkMediaUrlAllowlist = listToText(readDingtalkShared(['mediaUrlAllowlist']))
+    forms.value.dingtalk.dingtalkShowThinking =
+      typeof readDingtalkShared(['showThinking']) === 'boolean'
+        ? (readDingtalkShared(['showThinking']) as boolean)
         : true
-    forms.value.dingtalk.dingtalkSystemPrompt = asString(readDingtalk(['systemPrompt']))
-    forms.value.dingtalk.dingtalkDebug = Boolean(readDingtalk(['debug']))
+    forms.value.dingtalk.dingtalkMediaMaxMb = asString(readDingtalkShared(['mediaMaxMb']))
+    forms.value.dingtalk.dingtalkDebug = Boolean(readDingtalkShared(['debug']))
   } catch {
     // ignore, keep local values
   }
@@ -1500,20 +1704,8 @@ const persistChannelEnabled = async (channelId: ChannelId, enabled: boolean) => 
   })
 }
 
-const extractPairingCode = (raw: string): string => {
-  const compact = raw.trim().replace(/\s+/g, ' ')
-  if (!compact) return ''
-
-  const commandMatch = compact.match(/^openclaw\s+pairing\s+approve\s+feishu\s+(.+)$/i)
-  const commandCode = commandMatch ? commandMatch[1] : ''
-
-  const candidate = commandCode ? commandCode.trim() : compact
-  const firstToken = candidate.split(/\s+/)[0] || ''
-  return firstToken.replace(/^['"]|['"]$/g, '').trim()
-}
-
 const openPairingModal = () => {
-  if (selectedChannelId.value !== 'feishu') return
+  if (selectedChannelId.value !== 'feishu' || !selectedExtensionInstalled.value) return
   pairingInput.value = ''
   showPairingCodeModal.value = true
 }
@@ -1524,7 +1716,7 @@ const closePairingModal = () => {
 }
 
 const submitPairing = async () => {
-  const pairingCode = extractPairingCode(pairingInput.value)
+  const pairingCode = extractFeishuPairingCode(pairingInput.value)
   if (!pairingCode) {
     props.showToast('error', '请先填写有效配对码')
     return
@@ -1590,7 +1782,16 @@ const toggleChannelEnabled = async () => {
 
       await persistConfigMutation(mutable => {
         const key = channelConfigKey(channelId)
-        setPathValue(mutable, ['channels', key, 'accounts', selectedAccountId, 'enabled'], next)
+        if (channelId === 'dingtalk') {
+          const channels = ensureRecord(mutable, 'channels')
+          ensureDingtalkPluginAllowed(mutable)
+          ensureDingtalkChannelConfigNode(channels)
+        }
+        if (selectedAccountId === 'default') {
+          setPathValue(mutable, ['channels', key, 'enabled'], next)
+        } else {
+          setPathValue(mutable, ['channels', key, 'accounts', selectedAccountId, 'enabled'], next)
+        }
         syncChannelEnabledFromAccounts(mutable, channelId, next)
         upsertAgentBinding(mutable, channelId, selectedAgentId, selectedAccountId)
       })
@@ -1644,7 +1845,13 @@ const openInstallModal = async () => {
   installingExtension.value = true
 
   try {
-    await invoke<string>('install_channel_extension', { channelId: installingChannel.value })
+    const installArgs: {
+      channelId: ExtensionChannelId
+    } = {
+      channelId: installingChannel.value,
+    }
+
+    await invoke<string>('install_channel_extension', installArgs)
     props.showToast('success', `${selectedChannel.value.name} 扩展安装完成`)
     await refreshExtensionStatus()
   } catch (error) {
@@ -1671,117 +1878,98 @@ const saveConfig = async () => {
   const selectedAccountId = getSelectedAccountId(channelId)
   const accountMode = isAccountModeEnabled(channelId)
 
-  if ((channelId === 'telegram' || channelId === 'discord') && current.enabled && !current.token.trim()) {
-    props.showToast('error', `${selectedChannel.value.name} 已启用时需要填写 Bot Token`)
-    return
-  }
-
-  if (channelId === 'slack' && current.enabled && !current.slackBotToken.trim()) {
-    props.showToast('error', 'Slack 已启用时需要填写 Bot Token')
-    return
-  }
-
-  if ((channelId === 'feishu' || channelId === 'dingtalk') && (!current.token.trim() || !current.userId.trim())) {
-    props.showToast('error', `${selectedChannel.value.name} 需要先填写应用凭据`)
-    return
-  }
-
-  const saveWithAccountBinding = async (
-    applyChannelConfig: (mutable: JsonRecord, form: ChannelForm) => void,
-    successMessage: string
-  ) => {
-    await persistConfigMutation(mutable => {
-      applyChannelConfigToAccount(mutable, channelId, selectedAccountId, current, applyChannelConfig)
-      upsertAgentBinding(mutable, channelId, selectedAgentId, selectedAccountId)
-    })
-    await syncChannelsFromConfig()
-    props.showToast('success', successMessage)
-  }
-
   try {
-    if (channelId === 'feishu') {
-      if (accountMode) {
-        await saveWithAccountBinding(applyFeishuConfig, '飞书配置已保存')
+    if (isManagedChannel(channelId)) {
+      const managedChannelId = channelId
+      const managedApplyChannelConfig =
+        managedChannelId === 'telegram'
+          ? applyTelegramConfig
+          : managedChannelId === 'discord'
+            ? applyDiscordConfig
+            : managedChannelId === 'slack'
+              ? applySlackConfig
+              : managedChannelId === 'feishu'
+                ? applyFeishuConfig
+                : applyDingtalkConfig
+
+      if (selectedPanel.value === 'credentials') {
+        if ((managedChannelId === 'telegram' || managedChannelId === 'discord') && current.enabled && !current.token.trim()) {
+          props.showToast('error', `${selectedChannel.value.name} 已启用时需要填写 Bot Token`)
+          return
+        }
+
+        if (managedChannelId === 'slack' && current.enabled && !current.slackBotToken.trim()) {
+          props.showToast('error', 'Slack 已启用时需要填写 Bot Token')
+          return
+        }
+
+        if ((managedChannelId === 'feishu' || managedChannelId === 'dingtalk') && (!current.token.trim() || !current.userId.trim())) {
+          props.showToast('error', `${selectedChannel.value.name} 需要先填写应用凭据`)
+          return
+        }
+
+        const draftChannel = buildManagedChannelDraftNode(
+          managedChannelId,
+          current,
+          managedApplyChannelConfig
+        )
+
+        if (managedChannelId === 'feishu' && selectedAccountId === 'default') {
+          await invoke<string>('set_feishu_channel_config', {
+            appId: current.token.trim(),
+            appSecret: current.userId.trim(),
+            enabled: current.enabled
+          })
+        }
+
+        if (managedChannelId === 'dingtalk' && selectedAccountId === 'default') {
+          await invoke<string>('set_dingtalk_channel_config', {
+            clientId: current.token.trim(),
+            clientSecret: current.userId.trim(),
+            enabled: current.enabled
+          })
+        }
+
+        await persistConfigMutation(mutable => {
+          if (managedChannelId === 'dingtalk') {
+            ensureDingtalkPluginAllowed(mutable)
+          }
+
+          if (selectedAccountId === 'default') {
+            saveMessageChannelDefaultAccountConfig(mutable, managedChannelId, draftChannel)
+          } else {
+            saveMessageChannelAccountConfig(mutable, managedChannelId, selectedAccountId, draftChannel)
+            upsertAgentBinding(mutable, managedChannelId, selectedAgentId, selectedAccountId)
+          }
+
+          syncChannelEnabledFromAccounts(mutable, managedChannelId, current.enabled)
+        })
+
+        await syncChannelsFromConfig()
+        props.showToast('success', `${selectedChannel.value.name}账号配置已保存`)
         return
       }
 
-      await invoke<string>('set_feishu_channel_config', {
-        appId: current.token.trim(),
-        appSecret: current.userId.trim(),
-        enabled: current.enabled
-      })
+      const draftChannel = buildManagedChannelDraftNode(managedChannelId, current, managedApplyChannelConfig)
       await persistConfigMutation(mutable => {
-        applyFeishuConfig(mutable, current)
+        if (managedChannelId === 'dingtalk') {
+          ensureDingtalkPluginAllowed(mutable)
+        }
+        saveMessageChannelPublicConfig(mutable, managedChannelId, draftChannel)
       })
       await syncChannelsFromConfig()
-      props.showToast('success', '飞书配置已保存')
-      return
-    }
-
-    if (channelId === 'dingtalk') {
-      if (accountMode) {
-        await saveWithAccountBinding(applyDingtalkConfig, '钉钉配置已保存')
-        return
-      }
-
-      await invoke<string>('set_dingtalk_channel_config', {
-        clientId: current.token.trim(),
-        clientSecret: current.userId.trim(),
-        enabled: current.enabled
-      })
-      await persistConfigMutation(mutable => {
-        applyDingtalkConfig(mutable, current)
-      })
-      await syncChannelsFromConfig()
-      props.showToast('success', '钉钉配置已保存')
-      return
-    }
-
-    if (channelId === 'telegram') {
-      if (accountMode) {
-        await saveWithAccountBinding(applyTelegramConfig, 'Telegram 配置已保存')
-        return
-      }
-
-      await persistConfigMutation(mutable => {
-        applyTelegramConfig(mutable, current)
-      })
-      await syncChannelsFromConfig()
-      props.showToast('success', 'Telegram 配置已保存')
-      return
-    }
-
-    if (channelId === 'discord') {
-      if (accountMode) {
-        await saveWithAccountBinding(applyDiscordConfig, 'Discord 配置已保存')
-        return
-      }
-
-      await persistConfigMutation(mutable => {
-        applyDiscordConfig(mutable, current)
-      })
-      await syncChannelsFromConfig()
-      props.showToast('success', 'Discord 配置已保存')
-      return
-    }
-
-    if (channelId === 'slack') {
-      if (accountMode) {
-        await saveWithAccountBinding(applySlackConfig, 'Slack 配置已保存')
-        return
-      }
-
-      await persistConfigMutation(mutable => {
-        applySlackConfig(mutable, current)
-      })
-      await syncChannelsFromConfig()
-      props.showToast('success', 'Slack 配置已保存')
+      props.showToast('success', `${selectedChannel.value.name}公共配置已保存`)
       return
     }
 
     if (channelId === 'whatsapp') {
       if (accountMode) {
-        await saveWithAccountBinding(applyWhatsAppConfig, 'WhatsApp 配置已保存')
+        await persistConfigMutation(mutable => {
+          applyChannelConfigToAccount(mutable, channelId, selectedAccountId, current, applyWhatsAppConfig)
+          upsertAgentBinding(mutable, channelId, selectedAgentId, selectedAccountId)
+        })
+        await syncChannelsFromConfig()
+        props.showToast('success', 'WhatsApp 配置已保存')
         return
       }
 
@@ -1795,7 +1983,12 @@ const saveConfig = async () => {
 
     if (channelId === 'imessage') {
       if (accountMode) {
-        await saveWithAccountBinding(applyIMessageConfig, 'iMessage 配置已保存')
+        await persistConfigMutation(mutable => {
+          applyChannelConfigToAccount(mutable, channelId, selectedAccountId, current, applyIMessageConfig)
+          upsertAgentBinding(mutable, channelId, selectedAgentId, selectedAccountId)
+        })
+        await syncChannelsFromConfig()
+        props.showToast('success', 'iMessage 配置已保存')
         return
       }
 
@@ -1815,7 +2008,15 @@ const saveConfig = async () => {
   }
 }
 
+const handleClickOutside = (event: MouseEvent) => {
+  const target = event.target as HTMLElement | null
+  if (!target?.closest('.message-channel-account-dropdown')) {
+    showAccountSelectorDropdown.value = false
+  }
+}
+
 onMounted(async () => {
+  document.addEventListener('click', handleClickOutside)
   await syncChannelsFromConfig()
   await refreshExtensionStatus()
 
@@ -1836,6 +2037,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  document.removeEventListener('click', handleClickOutside)
   unlistenExtensionInstallLog?.()
   unlistenExtensionInstallState?.()
 })
@@ -1843,7 +2045,7 @@ onUnmounted(() => {
 
 <template>
   <div class="oc-page-root">
-    <div class="grid h-full min-h-0 grid-cols-1 gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
+    <div class="grid h-full min-h-0 grid-cols-1 gap-3 lg:grid-cols-[292px_minmax(0,1fr)]">
       <section class="oc-panel min-h-0 overflow-visible flex flex-col">
         <div class="border-b px-4 py-3" style="border-color: var(--oc-divider-soft);">
           <h3 class="text-lg font-semibold" style="color: var(--oc-text-primary);">消息渠道</h3>
@@ -1895,57 +2097,15 @@ onUnmounted(() => {
       <section class="oc-panel min-h-0 overflow-hidden flex flex-col">
         <div class="border-b px-5 py-4" style="border-color: var(--oc-divider-soft);">
           <div class="flex items-start justify-between gap-3">
-            <div class="flex items-center gap-3">
-              <div class="flex h-10 w-10 items-center justify-center rounded-full border" style="border-color: var(--oc-divider); background: var(--oc-card-elevated);">
-                <component :is="selectedChannel.icon" class="h-5 w-5" :style="{ color: selectedChannel.iconColor }" />
-              </div>
-              <div>
-                <h3 class="text-[22px] font-semibold leading-tight" style="color: var(--oc-text-primary);">配置 {{ selectedChannel.name }}</h3>
-                <p class="mt-1 text-sm" style="color: var(--oc-text-muted);">{{ hints[selectedChannelId] }}</p>
-                <div v-if="showAgentSelector || showAccountSelector" class="mt-3 flex flex-wrap gap-2">
-                  <label
-                    v-if="showAgentSelector"
-                    class="inline-flex items-center gap-2 rounded-[10px] border px-2.5 py-1.5 text-xs"
-                    style="border-color: var(--oc-card-border); background: var(--oc-card-elevated); color: var(--oc-text-secondary);"
-                  >
-                    Agent
-                    <select
-                      class="oc-select h-7 min-w-[160px] py-1 text-xs"
-                      :value="currentAgentId"
-                      :disabled="!canConfigureCurrentChannel"
-                      @change="(event) => { void handleAgentSelectionChange((event.target as HTMLSelectElement).value) }"
-                    >
-                      <option v-for="agent in currentAgentOptions" :key="agent.id" :value="agent.id">
-                        {{ agent.label }}
-                      </option>
-                    </select>
-                  </label>
-
-                  <label
-                    v-if="showAccountSelector"
-                    class="inline-flex items-center gap-2 rounded-[10px] border px-2.5 py-1.5 text-xs"
-                    style="border-color: var(--oc-card-border); background: var(--oc-card-elevated); color: var(--oc-text-secondary);"
-                  >
-                    Account
-                    <select
-                      class="oc-select h-7 min-w-[160px] py-1 text-xs"
-                      :value="currentAccountId"
-                      :disabled="!canConfigureCurrentChannel"
-                      @change="(event) => { void handleAccountSelectionChange((event.target as HTMLSelectElement).value) }"
-                    >
-                      <option v-for="accountId in currentAccountOptions" :key="accountId" :value="accountId">
-                        {{ accountId }}
-                      </option>
-                    </select>
-                  </label>
+            <div :class="messageChannelHeaderLayout.leftColumn">
+              <div class="flex items-center gap-3">
+                <div class="flex h-10 w-10 items-center justify-center rounded-full border" style="border-color: var(--oc-divider); background: var(--oc-card-elevated);">
+                  <component :is="selectedChannel.icon" :class="['h-5 w-5', messageChannelHeaderLayout.icon]" :style="{ color: selectedChannel.iconColor }" />
                 </div>
-                <p
-                  v-if="showAgentSelector || showAccountSelector"
-                  class="mt-1 text-xs"
-                  style="color: var(--oc-text-quiet);"
-                >
-                  绑定关系：<code>bindings</code> 中 <code>agentId={{ currentAgentId }}</code> → <code>channel={{ channelConfigKey(selectedChannelId) }}</code> → <code>accountId={{ currentAccountId }}</code>
-                </p>
+                <div :class="messageChannelHeaderLayout.leftMeta">
+                  <h3 class="text-[22px] font-semibold leading-tight" style="color: var(--oc-text-primary);">配置 {{ selectedChannel.name }}</h3>
+                  <p class="mt-1 text-sm" style="color: var(--oc-text-muted);">{{ hints[selectedChannelId] }}</p>
+                </div>
               </div>
             </div>
 
@@ -1960,15 +2120,11 @@ onUnmounted(() => {
               <Download v-else class="h-4 w-4" />
               安装扩展
             </button>
-            <div
-              v-else
-              class="inline-flex h-9 items-center gap-3 rounded-[10px] border px-3 text-sm"
-              style="border-color: var(--oc-card-border); background: var(--oc-card-elevated); color: var(--oc-text-secondary);"
-            >
+            <div v-else :class="messageChannelHeaderLayout.toggleWrap">
               <span class="text-xs font-medium" style="color: var(--oc-text-muted);">是否启用</span>
               <button
                 type="button"
-                class="relative inline-flex h-6 w-11 items-center rounded-full border transition-colors"
+                :class="messageChannelHeaderLayout.toggleControl"
                 :style="{
                   borderColor: currentForm.enabled ? 'color-mix(in srgb, var(--oc-success) 55%, transparent)' : 'var(--oc-card-border)',
                   background: currentForm.enabled
@@ -1976,14 +2132,15 @@ onUnmounted(() => {
                     : 'color-mix(in srgb, var(--oc-card-elevated) 92%, transparent)'
                 }"
                 :disabled="!canConfigureCurrentChannel"
+                :title="enabledLabel"
+                :aria-label="`${selectedChannel.name}${enabledLabel}`"
+                :aria-pressed="currentForm.enabled"
                 @click="toggleChannelEnabled"
               >
                 <span
-                  class="h-4 w-4 rounded-full border transition-transform"
+                  :class="messageChannelHeaderLayout.toggleThumb"
                   :style="{
-                    borderColor: 'var(--oc-card-border)',
-                    background: 'var(--oc-card)',
-                    transform: currentForm.enabled ? 'translateX(22px)' : 'translateX(2px)'
+                    transform: currentForm.enabled ? 'translateX(22px)' : 'translateX(0)'
                   }"
                 />
               </button>
@@ -1995,9 +2152,65 @@ onUnmounted(() => {
         </div>
 
         <div class="border-b px-4 py-2" style="border-color: var(--oc-divider-soft);">
-          <div class="flex flex-wrap gap-2">
+          <div class="flex flex-wrap items-center gap-2">
+            <div v-if="showAccountSelector" class="relative message-channel-account-dropdown">
+              <div class="flex items-stretch">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  :class="[messageChannelHeaderLayout.accountSelectTrigger, '!rounded-r-none border-r-0 text-sm']"
+                  :style="selectedPanel === 'credentials' ? { background: 'var(--oc-item-active)', borderColor: 'var(--oc-card-border-strong)', color: 'var(--oc-text-primary)' } : undefined"
+                  :disabled="!canConfigureCurrentChannel || installingExtension"
+                  @click.stop="toggleAccountSelectorDropdown"
+                >
+                  <span class="truncate">{{ currentAccountTabLabel }}</span>
+                  <ChevronDown class="h-4 w-4 shrink-0" :class="{ 'rotate-180': showAccountSelectorDropdown }" />
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="!rounded-l-none !h-8 px-2.5"
+                  :style="selectedPanel === 'credentials' ? { background: 'var(--oc-item-active)', borderColor: 'var(--oc-card-border-strong)', color: 'var(--oc-text-primary)' } : undefined"
+                  :disabled="!canConfigureCurrentChannel || installingExtension"
+                  @click.stop="openAccountModal"
+                >
+                  <Plus class="h-3.5 w-3.5" />
+                </Button>
+              </div>
+              <div
+                v-if="showAccountSelectorDropdown"
+                :class="messageChannelHeaderLayout.accountSelectMenu"
+              >
+                <button
+                  v-for="account in currentAccountOptions"
+                  :key="account.id"
+                  type="button"
+                  class="oc-dropdown-item flex w-full cursor-pointer items-start justify-between gap-3 text-left text-sm"
+                  :style="account.id === currentAccountId ? { background: 'var(--oc-item-active)' } : undefined"
+                  @click="() => { void handleAccountSelectionChange(account.id) }"
+                >
+                  <div class="min-w-0">
+                    <div class="truncate font-medium" style="color: var(--oc-text-primary);">{{ account.label }}</div>
+                    <div class="text-xs" style="color: var(--oc-text-muted);">{{ account.id === 'default' ? '默认账号' : account.id }}</div>
+                  </div>
+                  <Check v-if="account.id === currentAccountId" class="mt-0.5 h-4 w-4 shrink-0" style="color: var(--oc-accent);" />
+                </button>
+                <div v-if="currentAccountId !== 'default'" class="oc-dropdown-separator"></div>
+                <button
+                  v-if="currentAccountId !== 'default'"
+                  type="button"
+                  class="oc-dropdown-item flex w-full items-center gap-2 text-sm"
+                  style="color: var(--oc-danger);"
+                  @click="removeSelectedAccount"
+                >
+                  <Trash2 class="h-3.5 w-3.5" />
+                  删除当前账号
+                </button>
+              </div>
+            </div>
+
             <button
-              v-for="tab in panelTabs"
+              v-for="tab in publicPanelTabs"
               :key="tab.id"
               type="button"
               class="oc-toolbar-btn h-8 px-3 text-sm"
@@ -2007,6 +2220,7 @@ onUnmounted(() => {
               {{ tab.label }}
             </button>
           </div>
+          <p class="mt-2 text-xs" style="color: var(--oc-text-muted);">{{ currentPanelScopeHint }}</p>
         </div>
 
         <div class="min-h-0 flex-1 overflow-y-auto p-5">
@@ -2025,7 +2239,7 @@ onUnmounted(() => {
             <template v-if="selectedChannelId === 'telegram' || selectedChannelId === 'discord'">
               <div>
                 <label class="mb-1.5 flex items-center gap-2 text-sm font-medium" style="color: var(--oc-text-secondary);">
-                  Bot Token <span style="color: var(--oc-danger);">*</span>
+                  Bot Token（{{ accountScopedFieldPath(selectedChannelId === 'telegram' ? 'botToken' : 'token') }}）<span style="color: var(--oc-danger);">*</span>
                   <Check class="h-3.5 w-3.5" style="color: var(--oc-success);" v-if="currentForm.token" />
                 </label>
                 <div class="relative">
@@ -2052,10 +2266,10 @@ onUnmounted(() => {
 
               <div class="rounded-[12px] border p-3 text-sm" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated); color: var(--oc-text-muted);">
                 <template v-if="selectedChannelId === 'telegram'">
-                  保存后将写入 <code>channels.telegram.botToken</code>。
+                  保存后将写入 <code>{{ accountScopedFieldPath('botToken') }}</code>。
                 </template>
                 <template v-else>
-                  保存后将写入 <code>channels.discord.token</code>。
+                  保存后将写入 <code>{{ accountScopedFieldPath('token') }}</code>。
                 </template>
               </div>
             </template>
@@ -2064,8 +2278,8 @@ onUnmounted(() => {
               <div>
                 <label class="mb-1.5 flex items-center gap-2 text-sm font-medium" style="color: var(--oc-text-secondary);">
                   {{ selectedChannelId === 'feishu'
-                    ? '飞书 App ID（channels.feishu.appId）'
-                    : 'Client ID（channels.dingtalk-connector.clientId）' }}
+                    ? `飞书 App ID（${accountScopedFieldPath('appId')}）`
+                    : `Client ID（${accountScopedFieldPath('clientId')}）` }}
                   <span style="color: var(--oc-danger);">*</span>
                   <Check class="h-3.5 w-3.5" style="color: var(--oc-success);" v-if="currentForm.token" />
                 </label>
@@ -2081,8 +2295,8 @@ onUnmounted(() => {
               <div>
                 <label class="mb-1.5 flex items-center gap-2 text-sm font-medium" style="color: var(--oc-text-secondary);">
                   {{ selectedChannelId === 'feishu'
-                    ? '飞书 App Secret（channels.feishu.appSecret）'
-                    : 'Client Secret（channels.dingtalk-connector.clientSecret）' }}
+                    ? `飞书 App Secret（${accountScopedFieldPath('appSecret')}）`
+                    : `Client Secret（${accountScopedFieldPath('clientSecret')}）` }}
                   <span style="color: var(--oc-danger);">*</span>
                   <Check class="h-3.5 w-3.5" style="color: var(--oc-success);" v-if="currentForm.userId" />
                 </label>
@@ -2107,12 +2321,56 @@ onUnmounted(() => {
                   </button>
                 </div>
               </div>
+
+              <template v-if="selectedChannelId === 'dingtalk'">
+                <div class="grid gap-4 md:grid-cols-2">
+                  <div>
+                    <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">账号名称（{{ accountScopedFieldPath('name') }}）</label>
+                    <Input
+                      :model-value="currentForm.dingtalkName"
+                      placeholder="可选，用于区分多个账号"
+                      :disabled="!canConfigureCurrentChannel"
+                      @update:model-value="(value) => { currentForm.dingtalkName = value }"
+                    />
+                  </div>
+
+                  <div>
+                    <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">Agent ID（{{ accountScopedFieldPath('agentId') }}）</label>
+                    <Input
+                      :model-value="currentForm.dingtalkAgentId"
+                      placeholder="main / 123456"
+                      :disabled="!canConfigureCurrentChannel"
+                      @update:model-value="(value) => { currentForm.dingtalkAgentId = value }"
+                    />
+                  </div>
+
+                  <div>
+                    <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">Robot Code（{{ accountScopedFieldPath('robotCode') }}）</label>
+                    <Input
+                      :model-value="currentForm.dingtalkRobotCode"
+                      placeholder="可选，发送媒体时需要"
+                      :disabled="!canConfigureCurrentChannel"
+                      @update:model-value="(value) => { currentForm.dingtalkRobotCode = value }"
+                    />
+                  </div>
+
+                  <div>
+                    <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">Corp ID（{{ accountScopedFieldPath('corpId') }}）</label>
+                    <Input
+                      :model-value="currentForm.dingtalkCorpId"
+                      placeholder="可选，部分能力需要"
+                      :disabled="!canConfigureCurrentChannel"
+                      @update:model-value="(value) => { currentForm.dingtalkCorpId = value }"
+                    />
+                  </div>
+                </div>
+              </template>
             </template>
 
             <template v-else-if="selectedChannelId === 'slack'">
               <div>
                 <label class="mb-1.5 flex items-center gap-2 text-sm font-medium" style="color: var(--oc-text-secondary);">
-                  Bot Token（channels.slack.botToken）<span style="color: var(--oc-danger);">*</span>
+                  Bot Token（{{ accountScopedFieldPath('botToken') }}）<span style="color: var(--oc-danger);">*</span>
                   <Check class="h-3.5 w-3.5" style="color: var(--oc-success);" v-if="currentForm.slackBotToken" />
                 </label>
                 <div class="relative">
@@ -2138,7 +2396,7 @@ onUnmounted(() => {
               </div>
 
               <div>
-                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">App Token（channels.slack.appToken）</label>
+                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">App Token（{{ accountScopedFieldPath('appToken') }}）</label>
                 <Input
                   :model-value="currentForm.slackAppToken"
                   :type="revealSecret ? 'text' : 'password'"
@@ -2150,7 +2408,7 @@ onUnmounted(() => {
               </div>
 
               <div>
-                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">Signing Secret（channels.slack.signingSecret）</label>
+                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">Signing Secret（{{ accountScopedFieldPath('signingSecret') }}）</label>
                 <div class="relative">
                   <Input
                     :type="revealSlackSigningSecret ? 'text' : 'password'"
@@ -2504,7 +2762,7 @@ onUnmounted(() => {
 
             <template v-else-if="selectedChannelId === 'dingtalk'">
               <div>
-                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">DM 策略（channels.dingtalk-connector.dmPolicy）</label>
+                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">DM 策略（channels.dingtalk.dmPolicy）</label>
                 <select v-model="currentForm.dingtalkDmPolicy" class="oc-select" :disabled="!canConfigureCurrentChannel">
                   <option value="open">open</option>
                   <option value="pairing">pairing</option>
@@ -2513,7 +2771,7 @@ onUnmounted(() => {
               </div>
 
               <div>
-                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">allowFrom（channels.dingtalk-connector.allowFrom）</label>
+                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">allowFrom（channels.dingtalk.allowFrom）</label>
                 <textarea
                   class="oc-textarea"
                   :value="currentForm.dingtalkAllowFrom"
@@ -2524,7 +2782,7 @@ onUnmounted(() => {
               </div>
 
               <div>
-                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">群组策略（channels.dingtalk-connector.groupPolicy）</label>
+                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">群组策略（channels.dingtalk.groupPolicy）</label>
                 <select v-model="currentForm.dingtalkGroupPolicy" class="oc-select" :disabled="!canConfigureCurrentChannel">
                   <option value="open">open</option>
                   <option value="allowlist">allowlist</option>
@@ -2714,64 +2972,9 @@ onUnmounted(() => {
             </template>
           </div>
 
-          <div v-else-if="selectedPanel === 'gateway'" class="space-y-4">
-            <div>
-              <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">Gateway Token（channels.dingtalk-connector.gatewayToken）</label>
-              <div class="relative">
-                <Input
-                  :type="revealGatewayToken ? 'text' : 'password'"
-                  :model-value="currentForm.dingtalkGatewayToken"
-                  placeholder="Bearer token"
-                  class="pr-11"
-                  :disabled="!canConfigureCurrentChannel"
-                  @update:model-value="(value) => { currentForm.dingtalkGatewayToken = value }"
-                />
-                <button
-                  type="button"
-                  class="absolute inset-y-0 right-0 flex w-10 items-center justify-center transition-colors hover:opacity-80"
-                  style="color: var(--oc-text-muted);"
-                  :disabled="!canConfigureCurrentChannel"
-                  @click="revealGatewayToken = !revealGatewayToken"
-                >
-                  <EyeOff v-if="revealGatewayToken" class="h-4 w-4" />
-                  <Eye v-else class="h-4 w-4" />
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">Gateway Password（channels.dingtalk-connector.gatewayPassword）</label>
-              <div class="relative">
-                <Input
-                  :type="revealGatewayPassword ? 'text' : 'password'"
-                  :model-value="currentForm.dingtalkGatewayPassword"
-                  placeholder="可选，token 的替代方案"
-                  class="pr-11"
-                  :disabled="!canConfigureCurrentChannel"
-                  @update:model-value="(value) => { currentForm.dingtalkGatewayPassword = value }"
-                />
-                <button
-                  type="button"
-                  class="absolute inset-y-0 right-0 flex w-10 items-center justify-center transition-colors hover:opacity-80"
-                  style="color: var(--oc-text-muted);"
-                  :disabled="!canConfigureCurrentChannel"
-                  @click="revealGatewayPassword = !revealGatewayPassword"
-                >
-                  <EyeOff v-if="revealGatewayPassword" class="h-4 w-4" />
-                  <Eye v-else class="h-4 w-4" />
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">Session 超时毫秒（channels.dingtalk-connector.sessionTimeout）</label>
-              <Input
-                :model-value="currentForm.dingtalkSessionTimeout"
-                placeholder="1800000"
-                inputmode="numeric"
-                :disabled="!canConfigureCurrentChannel"
-                @update:model-value="(value) => { currentForm.dingtalkSessionTimeout = value }"
-              />
+          <div v-else-if="false" class="space-y-4">
+            <div class="rounded-[12px] border p-3 text-sm" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated); color: var(--oc-text-muted);">
+              当前版本的钉钉插件使用 Stream 模式，不再需要单独的网关配置。
             </div>
           </div>
 
@@ -3057,11 +3260,11 @@ onUnmounted(() => {
               <label class="inline-flex items-center gap-2 text-sm" style="color: var(--oc-text-secondary);">
                 <input
                   type="checkbox"
-                  :checked="currentForm.dingtalkEnableMediaUpload"
+                  :checked="currentForm.dingtalkShowThinking"
                   :disabled="!canConfigureCurrentChannel"
-                  @change="(event) => { currentForm.dingtalkEnableMediaUpload = (event.target as HTMLInputElement).checked }"
+                  @change="(event) => { currentForm.dingtalkShowThinking = (event.target as HTMLInputElement).checked }"
                 />
-                启用媒体提示注入（channels.dingtalk-connector.enableMediaUpload）
+                显示思考中状态（channels.dingtalk.showThinking）
               </label>
 
               <label class="inline-flex items-center gap-2 text-sm" style="color: var(--oc-text-secondary);">
@@ -3071,17 +3274,58 @@ onUnmounted(() => {
                   :disabled="!canConfigureCurrentChannel"
                   @change="(event) => { currentForm.dingtalkDebug = (event.target as HTMLInputElement).checked }"
                 />
-                调试日志（channels.dingtalk-connector.debug）
+                调试日志（channels.dingtalk.debug）
               </label>
 
+              <div class="grid gap-4 md:grid-cols-2">
+                <div>
+                  <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">回复类型（channels.dingtalk.messageType）</label>
+                  <select v-model="currentForm.dingtalkMessageType" class="oc-select" :disabled="!canConfigureCurrentChannel">
+                    <option value="markdown">markdown</option>
+                    <option value="card">card</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">卡片模板 Key（channels.dingtalk.cardTemplateKey）</label>
+                  <Input
+                    :model-value="currentForm.dingtalkCardTemplateKey"
+                    placeholder="content"
+                    :disabled="!canConfigureCurrentChannel"
+                    @update:model-value="(value) => { currentForm.dingtalkCardTemplateKey = value }"
+                  />
+                </div>
+
+                <div>
+                  <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">卡片模板 ID（channels.dingtalk.cardTemplateId）</label>
+                  <Input
+                    :model-value="currentForm.dingtalkCardTemplateId"
+                    placeholder="messageType=card 时可选"
+                    :disabled="!canConfigureCurrentChannel"
+                    @update:model-value="(value) => { currentForm.dingtalkCardTemplateId = value }"
+                  />
+                </div>
+
+                <div>
+                  <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">媒体大小上限 MB（channels.dingtalk.mediaMaxMb）</label>
+                  <Input
+                    :model-value="currentForm.dingtalkMediaMaxMb"
+                    placeholder="可选，如 30"
+                    inputmode="decimal"
+                    :disabled="!canConfigureCurrentChannel"
+                    @update:model-value="(value) => { currentForm.dingtalkMediaMaxMb = value }"
+                  />
+                </div>
+              </div>
+
               <div>
-                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">系统提示词（channels.dingtalk-connector.systemPrompt）</label>
+                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">媒体 URL 白名单（channels.dingtalk.mediaUrlAllowlist）</label>
                 <textarea
                   class="oc-textarea"
-                  :value="currentForm.dingtalkSystemPrompt"
-                  placeholder="可选"
+                  :value="currentForm.dingtalkMediaUrlAllowlist"
+                  placeholder="每行一个域名或 URL 前缀"
                   :disabled="!canConfigureCurrentChannel"
-                  @input="(event) => { currentForm.dingtalkSystemPrompt = (event.target as HTMLTextAreaElement).value }"
+                  @input="(event) => { currentForm.dingtalkMediaUrlAllowlist = (event.target as HTMLTextAreaElement).value }"
                 />
               </div>
             </template>
@@ -3098,13 +3342,13 @@ onUnmounted(() => {
           <div class="flex items-center gap-3">
             <Button class="min-w-[132px]" :disabled="!canConfigureCurrentChannel || installingExtension" @click="saveConfig">
               <Save class="h-4 w-4" />
-              保存配置
+              {{ saveButtonLabel }}
             </Button>
             <Button
               v-if="selectedChannelId === 'feishu'"
               variant="outline"
               class="min-w-[132px] whitespace-nowrap"
-              :disabled="!canConfigureCurrentChannel || installingExtension || approvingPairing"
+              :disabled="!selectedExtensionInstalled || installingExtension || approvingPairing"
               @click="openPairingModal"
             >
               <KeyRound class="h-4 w-4" />
@@ -3128,8 +3372,8 @@ onUnmounted(() => {
       v-if="showPairingCodeModal"
       title="填写配对码"
       description="请填写配对码，或直接粘贴完整命令。"
-      placeholder="openclaw pairing approve feishu UZM4NXNC"
-      note="支持粘贴完整命令，系统会自动提取配对码。"
+      :placeholder="FEISHU_PAIRING_APPROVE_COMMAND_EXAMPLE"
+      note="支持粘贴完整命令（含 --notify），系统会自动提取配对码。"
       :model-value="pairingInput"
       :loading="approvingPairing"
       :confirm-text="approvingPairing ? '配对中...' : '确认配对'"
@@ -3138,8 +3382,22 @@ onUnmounted(() => {
       @confirm="submitPairing"
     />
 
+    <CommonInputConfirmModal
+      v-if="showAccountModal"
+      title="新增账号"
+      description="请输入账号 ID。该值会作为 channels.*.accounts 下的键名。"
+      placeholder="main / ops / coding-plan"
+      note="仅支持字母、数字、点、下划线和中划线。创建后会复制当前账号配置到新账号。"
+      :model-value="accountInput"
+      :loading="submittingAccount"
+      :confirm-text="submittingAccount ? '创建中...' : '创建账号'"
+      @update:model-value="handleAccountInputChange"
+      @cancel="closeAccountModal"
+      @confirm="submitAccount"
+    />
+
     <div v-if="showInstallModal" class="oc-modal-overlay" @click.self="closeInstallModal">
-      <Card class="oc-modal-card w-full max-w-3xl max-h-[82vh] flex flex-col p-5">
+      <Card :class="messageChannelInstallModalLayout.card">
         <div class="flex items-center justify-between gap-2">
           <h3 class="text-lg font-semibold" style="color: var(--oc-text-primary);">
             安装扩展 {{ installingChannelName || selectedChannel.name }}
@@ -3156,7 +3414,7 @@ onUnmounted(() => {
           </span>
         </div>
 
-        <div class="mt-3 min-h-0 flex-1">
+        <div :class="messageChannelInstallModalLayout.logViewport">
           <TerminalLog :logs="installLogs" />
         </div>
 

@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/tauri'
 import {
   ChevronDown,
   ExternalLink,
+  Loader2,
   Monitor,
   Moon,
   RefreshCw,
@@ -14,14 +15,30 @@ import {
 import StatusDashboard from './components/pages/StatusDashboard.vue'
 import InstallPage from './components/pages/InstallPage.vue'
 import ConfigPage from './components/pages/ConfigPage.vue'
+import QuickSetupGuide from './components/pages/QuickSetupGuide.vue'
 import MessageChannelsPage from './components/pages/MessageChannelsPage.vue'
 import DiagnosticsPage from './components/pages/DiagnosticsPage.vue'
 import SshConnectModal from './components/SshConnectModal.vue'
 import SshFingerprintDialog from './components/SshFingerprintDialog.vue'
+import Button from './components/ui/Button.vue'
+import Card from './components/ui/Card.vue'
+import Input from './components/ui/Input.vue'
 import Toast from './components/ui/Toast.vue'
 import { deriveAppState } from './domain/appState'
 import { NAV_ITEMS, type NavPage } from './domain/navigation'
 import { isPrimaryModelPlaceholder } from './domain/configValidation'
+import { shouldShowDashboardButton } from './domain/dashboardVisibility'
+import { resolveGateTopbarTitle, shouldUseFixedGateInstallLayout } from './domain/gateInstallLayout'
+import { waitForGatewayReady } from './domain/gatewayStartup'
+import {
+  OPENCLAW_UNINSTALL_CONFIRM_PHRASE,
+  canConfirmOpenClawUninstallPhrase,
+  resolveOpenClawUninstallActionState,
+  resolveOpenClawUninstallCleanupItems,
+  shouldShowOpenClawUninstallAction as shouldRenderOpenClawUninstallAction,
+} from './domain/openclawUninstall'
+import { resolveAsyncButtonLabel, resolveAsyncButtonState, runAsyncOnce } from './domain/asyncButtonState'
+import { shouldShowOpenConfigFileAction } from './domain/sidebarConfigStatus'
 import appIcon from './assets/app-icon.png'
 import type {
   ConfigFileInfo,
@@ -33,6 +50,7 @@ import type {
 
 type EnvMode = 'local' | 'ssh'
 type ThemeMode = 'system' | 'light' | 'dark'
+type OpenClawUninstallStep = 'confirm' | 'phrase' | 'config'
 
 interface EnvironmentInfo {
   mode: EnvMode
@@ -53,6 +71,7 @@ const sshFingerprint = ref<FingerprintInfo | null>(null)
 const sshFingerprintCallback = ref<(() => void) | null>(null)
 const themeStorageKey = 'openclawswitch.theme.mode'
 const browserDefaultProfile = 'openclaw'
+const isWindows = navigator.userAgent.toLowerCase().includes('windows')
 const themeMode = ref<ThemeMode>('system')
 const themeModeCycle: ThemeMode[] = ['system', 'light', 'dark']
 const browserDefaultProfileEnabled = ref(false)
@@ -61,12 +80,20 @@ const browserSettingSaving = ref(false)
 const browserSettingError = ref('')
 const browserSettingPath = ref('')
 const browserSettingReady = ref(false)
+const configFilePath = ref('')
+const uninstallOpenClawStep = ref<OpenClawUninstallStep | null>(null)
+const uninstallOpenClawInput = ref('')
+const uninstallOpenClawLoading = ref(false)
 
 const envStatus = ref<EnvironmentStatus | null>(null)
 const configLoaded = ref(false)
 const primaryModelValid = ref(false)
 const gatewayReachable = ref(false)
+const gatewayServiceInstalled = ref(true)
 const lastActionFailed = ref(false)
+const pendingToolId = ref<string | null>(null)
+const dashboardOpening = ref(false)
+const environmentRefreshing = ref(false)
 
 const loading = ref(false)
 const loadingMessage = ref('加载中...')
@@ -99,6 +126,25 @@ const gateState = computed<GateState>(() => {
 })
 
 const isGateActive = computed(() => gateState.value !== null)
+const showDashboardButton = computed(() => shouldShowDashboardButton(gateState.value))
+const dashboardButtonState = computed(() =>
+  resolveAsyncButtonState({
+    loading: dashboardOpening.value,
+  })
+)
+const dashboardButtonLabel = computed(() =>
+  resolveAsyncButtonLabel({
+    loading: dashboardOpening.value,
+    label: 'Dashboard',
+    loadingLabel: '打开中...',
+  })
+)
+const refreshEnvironmentButtonState = computed(() =>
+  resolveAsyncButtonState({
+    loading: environmentRefreshing.value,
+    baseDisabled: loading.value && !environmentRefreshing.value,
+  })
+)
 
 const stateTextMap: Record<string, string> = {
   NO_TARGET: '未连接环境',
@@ -116,7 +162,7 @@ const navMeta: Record<NavPage, { title: string; subtitle: string }> = {
   },
   'ai-config': {
     title: '模型配置',
-    subtitle: '保存配置并验证生效，避免“假成功”。',
+    subtitle: '保存配置文件并调整模型路由。',
   },
   diagnostics: {
     title: '服务诊断',
@@ -133,8 +179,12 @@ const navMeta: Record<NavPage, { title: string; subtitle: string }> = {
 }
 
 const pageMeta = computed(() => navMeta[activeNav.value])
-const topbarTitle = computed(() =>
-  isGateActive.value ? '安装与接入' : pageMeta.value.title
+const topbarTitle = computed(() => {
+  if (!isGateActive.value) return pageMeta.value.title
+  return resolveGateTopbarTitle(gateState.value, targetMode.value)
+})
+const gateInstallLayoutFixed = computed(() =>
+  shouldUseFixedGateInstallLayout(gateState.value, targetMode.value)
 )
 const themeModeLabel = computed(() => {
   if (themeMode.value === 'light') return '浅色'
@@ -154,6 +204,13 @@ const configStatusText = computed(() => {
   if (!primaryModelValid.value) return '主模型无效'
   return '配置有效'
 })
+const showOpenConfigFileAction = computed(() =>
+  shouldShowOpenConfigFileAction({
+    envMode: currentEnv.value.mode,
+    configStatusText: configStatusText.value,
+    configFilePath: configFilePath.value,
+  })
+)
 const browserSettingStatusText = computed(() => {
   if (browserSettingLoading.value) return '加载中'
   if (browserSettingSaving.value) return '保存中'
@@ -165,7 +222,32 @@ const browserSettingSwitchDisabled = computed(() => {
   if (currentEnv.value.mode === 'ssh' && !sshConnected.value) return true
   return !browserSettingReady.value
 })
-
+const showOpenClawUninstallAction = computed(() =>
+  shouldRenderOpenClawUninstallAction({
+    envMode: currentEnv.value.mode,
+  })
+)
+const openClawUninstallActionState = computed(() =>
+  resolveOpenClawUninstallActionState({
+    envMode: currentEnv.value.mode,
+    openclawInstalled: openclawInstalled.value,
+    loading: uninstallOpenClawLoading.value,
+  })
+)
+const uninstallOpenClawPhraseValid = computed(() =>
+  canConfirmOpenClawUninstallPhrase(uninstallOpenClawInput.value)
+)
+const currentSystemOs = computed<'windows' | 'macos' | 'linux'>(() => {
+  if (envStatus.value?.system.os) return envStatus.value.system.os
+  if (isWindows) return 'windows'
+  return navigator.userAgent.toLowerCase().includes('mac') ? 'macos' : 'linux'
+})
+const uninstallCleanupItemsWithoutConfig = computed(() =>
+  resolveOpenClawUninstallCleanupItems({ os: currentSystemOs.value, removeConfigDir: false })
+)
+const uninstallCleanupItemsWithConfig = computed(() =>
+  resolveOpenClawUninstallCleanupItems({ os: currentSystemOs.value, removeConfigDir: true })
+)
 const isThemeMode = (raw: string | null): raw is ThemeMode =>
   raw === 'system' || raw === 'light' || raw === 'dark'
 
@@ -218,7 +300,83 @@ const closeToast = () => {
   toast.value = null
 }
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+const resetOpenClawUninstallFlow = () => {
+  uninstallOpenClawStep.value = null
+  uninstallOpenClawInput.value = ''
+}
+
+const closeOpenClawUninstallFlow = () => {
+  if (uninstallOpenClawLoading.value) return
+  resetOpenClawUninstallFlow()
+}
+
+const openOpenClawUninstallFlow = () => {
+  if (openClawUninstallActionState.value.disabled) return
+  uninstallOpenClawInput.value = ''
+  uninstallOpenClawStep.value = 'confirm'
+}
+
+const continueOpenClawUninstallFlow = () => {
+  if (uninstallOpenClawLoading.value) return
+  uninstallOpenClawInput.value = ''
+  uninstallOpenClawStep.value = 'phrase'
+}
+
+const confirmOpenClawUninstallPhraseStep = () => {
+  if (uninstallOpenClawLoading.value || !uninstallOpenClawPhraseValid.value) return
+  uninstallOpenClawStep.value = 'config'
+}
+
+const copyTextToClipboard = async (value: string) => {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value)
+    return
+  }
+
+  const textarea = document.createElement('textarea')
+  textarea.value = value
+  textarea.setAttribute('readonly', 'true')
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  textarea.select()
+  const success = document.execCommand('copy')
+  document.body.removeChild(textarea)
+  if (!success) {
+    throw new Error('copy_failed')
+  }
+}
+
+const copyOpenClawUninstallPhrase = async () => {
+  try {
+    await copyTextToClipboard(OPENCLAW_UNINSTALL_CONFIRM_PHRASE)
+    showToast('success', '确认短语已复制')
+  } catch {
+    showToast('error', '复制失败，请手动复制')
+  }
+}
+const runOpenClawUninstall = async (removeConfigDir: boolean) => {
+  if (openClawUninstallActionState.value.disabled) return
+
+  uninstallOpenClawLoading.value = true
+  loading.value = true
+  loadingMessage.value = removeConfigDir
+    ? '正在卸载 OpenClaw 并删除 ~/.openclaw...'
+    : '正在卸载 OpenClaw...'
+
+  try {
+    const result = await invoke<string>('uninstall_openclaw', { removeConfigDir })
+    resetOpenClawUninstallFlow()
+    await checkEnvironment()
+    showToast('success', result)
+  } catch (error) {
+    showToast('error', `卸载 OpenClaw 失败: ${String(error)}`)
+  } finally {
+    uninstallOpenClawLoading.value = false
+    loading.value = false
+    loadingMessage.value = '加载中...'
+  }
+}
 
 const runGatewayStartCommand = async () => {
   if (currentEnv.value.mode === 'ssh') {
@@ -243,29 +401,20 @@ const checkGatewayHealth = async (): Promise<boolean> => {
   }
 }
 
-const waitForGatewayReady = async (
+const waitForGatewayReadyWithMessage = async (
+  message: string,
   maxAttempts = 30,
   intervalMs = 2000
 ): Promise<boolean> => {
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const healthy = await checkGatewayHealth()
-    if (healthy) return true
-
-    loadingMessage.value = `正在等待网关启动（${attempt}/${maxAttempts}）...`
-
-    if (attempt % 5 === 0) {
-      try {
-        await runGatewayStartCommand()
-      } catch {
-        // ignored
-      }
-    }
-
-    if (attempt < maxAttempts) {
-      await sleep(intervalMs)
-    }
-  }
-  return false
+  let attempts = 0
+  return waitForGatewayReady(
+    async () => {
+      attempts += 1
+      loadingMessage.value = `${message}（${attempts}/${maxAttempts}）...`
+      return checkGatewayHealth()
+    },
+    { maxAttempts, intervalMs }
+  )
 }
 
 const markActionResult = (
@@ -279,11 +428,25 @@ const markActionResult = (
   showToast(ok ? 'success' : 'error', detail)
 }
 
+const runWithPendingTool = async (toolId: string, action: () => Promise<void>) => {
+  if (pendingToolId.value) {
+    return
+  }
+
+  pendingToolId.value = toolId
+  try {
+    await action()
+  } finally {
+    pendingToolId.value = null
+  }
+}
+
 const syncConfigSignals = async () => {
   if (!openclawInstalled.value) {
     configLoaded.value = false
     primaryModelValid.value = false
     gatewayReachable.value = false
+    configFilePath.value = ''
     return
   }
 
@@ -300,15 +463,18 @@ const syncConfigSignals = async () => {
         configLoaded.value = true
         primaryModelValid.value = !isPrimaryModelPlaceholder(primary)
       }
+      configFilePath.value = ''
     } else {
-      const [config] = await invoke<[OpenClawConfig, ConfigFileInfo]>('load_default_config')
+      const [config, info] = await invoke<[OpenClawConfig, ConfigFileInfo]>('load_default_config')
       const primary = config.agents?.defaults?.model?.primary
       configLoaded.value = true
       primaryModelValid.value = !isPrimaryModelPlaceholder(primary)
+      configFilePath.value = info.path
     }
   } catch {
     configLoaded.value = false
     primaryModelValid.value = false
+    configFilePath.value = ''
   }
 
   try {
@@ -322,6 +488,29 @@ const syncConfigSignals = async () => {
   }
 }
 
+const openConfigFile = async () => {
+  if (!showOpenConfigFileAction.value) return
+
+  try {
+    await invoke('open_path_in_default_app', { path: configFilePath.value })
+  } catch (error) {
+    showToast('error', `打开配置文件失败: ${String(error)}`)
+  }
+}
+
+const syncGatewayServiceInstallState = async () => {
+  if (!isWindows || currentEnv.value.mode !== 'local' || !openclawInstalled.value) {
+    gatewayServiceInstalled.value = true
+    return
+  }
+
+  try {
+    gatewayServiceInstalled.value = await invoke<boolean>('is_gateway_service_installed')
+  } catch {
+    gatewayServiceInstalled.value = false
+  }
+}
+
 const checkEnvironment = async () => {
   loading.value = true
   try {
@@ -331,6 +520,7 @@ const checkEnvironment = async () => {
         configLoaded.value = false
         primaryModelValid.value = false
         gatewayReachable.value = false
+        gatewayServiceInstalled.value = true
         return
       }
       envStatus.value = await invoke<EnvironmentStatus>('ssh_check_environment')
@@ -339,16 +529,27 @@ const checkEnvironment = async () => {
     }
 
     await syncConfigSignals()
+    await syncGatewayServiceInstallState()
   } catch {
     envStatus.value = null
     configLoaded.value = false
     primaryModelValid.value = false
     gatewayReachable.value = false
+    gatewayServiceInstalled.value = true
     markActionResult('环境检测', false, '', '环境检测失败')
   } finally {
     loading.value = false
   }
 }
+
+const refreshEnvironment = async () =>
+  runAsyncOnce({
+    isRunning: () => environmentRefreshing.value,
+    setRunning: (running) => {
+      environmentRefreshing.value = running
+    },
+    action: checkEnvironment,
+  })
 
 const pageBlockedReason = (target: NavPage) => {
   if (isGateActive.value) {
@@ -506,7 +707,7 @@ const applyDefaultConfig = async () => {
     await runGatewayStartCommand()
 
     loadingMessage.value = '正在监控网关健康状态...'
-    const ready = await waitForGatewayReady()
+    const ready = await waitForGatewayReadyWithMessage('正在等待网关启动')
     if (!ready) {
       throw new Error('网关在预期时间内未启动成功，请检查日志后重试')
     }
@@ -692,12 +893,20 @@ const handleSshConnected = async () => {
 }
 
 const openDashboard = async () => {
-  try {
-    await invoke('open_web_ui')
-    markActionResult('打开 Dashboard', true, '已静默打开 Dashboard（携带 token）')
-  } catch {
-    markActionResult('打开 Dashboard', false, '', '打开 Dashboard 失败')
-  }
+  await runAsyncOnce({
+    isRunning: () => dashboardOpening.value,
+    setRunning: (running) => {
+      dashboardOpening.value = running
+    },
+    action: async () => {
+      try {
+        await invoke('open_web_ui')
+        markActionResult('打开 Dashboard', true, '已静默打开 Dashboard（携带 token）')
+      } catch {
+        markActionResult('打开 Dashboard', false, '', '打开 Dashboard 失败')
+      }
+    },
+  })
 }
 
 const openToolPanel = async (toolId: string) => {
@@ -716,23 +925,52 @@ const openToolPanel = async (toolId: string) => {
     return
   }
 
+  if (toolId === 'install-service') {
+    await runWithPendingTool(toolId, async () => {
+      try {
+        await invoke('install_gateway_service')
+        const ready = await waitForGatewayReady(checkGatewayHealth, {
+          maxAttempts: 20,
+          intervalMs: 1000,
+        })
+        if (!ready) {
+          throw new Error('服务安装成功，但网关在预期时间内未对外提供服务')
+        }
+        markActionResult('安装网关服务', true, '网关服务已安装并完成健康检查')
+        await checkEnvironment()
+      } catch (error) {
+        markActionResult('安装网关服务', false, '', `安装失败: ${String(error)}`)
+      }
+    })
+    return
+  }
+
   if (toolId === 'webui') {
     await openDashboard()
     return
   }
 
   if (toolId === 'restart') {
-    try {
-      if (currentEnv.value.mode === 'ssh') {
-        await invoke('ssh_restart_gateway')
-      } else {
-        await invoke('restart_gateway')
+    await runWithPendingTool(toolId, async () => {
+      try {
+        if (currentEnv.value.mode === 'ssh') {
+          await invoke('ssh_restart_gateway')
+        } else {
+          await invoke('restart_gateway')
+        }
+        const ready = await waitForGatewayReady(checkGatewayHealth, {
+          maxAttempts: 20,
+          intervalMs: 1000,
+        })
+        if (!ready) {
+          throw new Error('重启命令已发送，但网关在预期时间内未恢复可访问')
+        }
+        markActionResult('重启网关', true, '网关已重启并完成健康检查')
+        await checkEnvironment()
+      } catch (error) {
+        markActionResult('重启网关', false, '', `重启失败: ${String(error)}`)
       }
-      markActionResult('重启网关', true, '网关重启命令已发送')
-      await checkEnvironment()
-    } catch {
-      markActionResult('重启网关', false, '', '重启失败')
-    }
+    })
     return
   }
 
@@ -747,32 +985,43 @@ const openToolPanel = async (toolId: string) => {
   }
 
   if (toolId === 'start') {
-    try {
-      if (currentEnv.value.mode === 'ssh') {
-        await invoke('ssh_start_gateway')
-      } else {
-        await invoke('start_gateway')
+    await runWithPendingTool(toolId, async () => {
+      try {
+        if (currentEnv.value.mode === 'ssh') {
+          await invoke('ssh_start_gateway')
+        } else {
+          await invoke('start_gateway')
+        }
+        const ready = await waitForGatewayReady(checkGatewayHealth, {
+          maxAttempts: 20,
+          intervalMs: 1000,
+        })
+        if (!ready) {
+          throw new Error('启动命令已发送，但网关在预期时间内未进入可访问状态')
+        }
+        markActionResult('启动网关服务', true, '网关已启动并完成健康检查')
+        await checkEnvironment()
+      } catch (error) {
+        markActionResult('启动网关服务', false, '', `启动失败: ${String(error)}`)
       }
-      markActionResult('启动网关服务', true, '启动命令已发送')
-      await checkEnvironment()
-    } catch {
-      markActionResult('启动网关服务', false, '', '启动失败')
-    }
+    })
     return
   }
 
   if (toolId === 'stop') {
-    try {
-      if (currentEnv.value.mode === 'ssh') {
-        await invoke('ssh_stop_gateway')
-      } else {
-        await invoke('stop_gateway')
+    await runWithPendingTool(toolId, async () => {
+      try {
+        if (currentEnv.value.mode === 'ssh') {
+          await invoke('ssh_stop_gateway')
+        } else {
+          await invoke('stop_gateway')
+        }
+        markActionResult('停止网关服务', true, '停止命令已发送')
+        await checkEnvironment()
+      } catch (error) {
+        markActionResult('停止网关服务', false, '', `停止失败: ${String(error)}`)
       }
-      markActionResult('停止网关服务', true, '停止命令已发送')
-      await checkEnvironment()
-    } catch {
-      markActionResult('停止网关服务', false, '', '停止失败')
-    }
+    })
     return
   }
 
@@ -782,6 +1031,14 @@ const openToolPanel = async (toolId: string) => {
 const handleInstallComplete = async () => {
   targetMode.value = 'local'
   lastActionFailed.value = false
+  activeNav.value = 'overview'
+  await checkEnvironment()
+}
+
+const handleQuickSetupComplete = async () => {
+  targetMode.value = 'local'
+  lastActionFailed.value = false
+  activeNav.value = 'overview'
   await checkEnvironment()
 }
 
@@ -842,7 +1099,20 @@ onUnmounted(() => {
             </div>
             <div class="flex items-center justify-between">
               <span>配置状态</span>
-              <span style="color: var(--oc-text-primary);">{{ configStatusText }}</span>
+              <span class="inline-flex items-center gap-1" style="color: var(--oc-text-primary);">
+                <span>{{ configStatusText }}</span>
+                <button
+                  v-if="showOpenConfigFileAction"
+                  type="button"
+                  class="inline-flex h-4 w-4 items-center justify-center rounded-[6px] transition-opacity hover:opacity-100"
+                  style="color: var(--oc-text-muted); opacity: 0.72;"
+                  title="打开配置文件"
+                  aria-label="打开配置文件"
+                  @click="openConfigFile"
+                >
+                  <ExternalLink class="h-3.5 w-3.5" />
+                </button>
+              </span>
             </div>
           </div>
         </div>
@@ -907,12 +1177,27 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <button class="oc-toolbar-btn h-8 w-8 !px-0" type="button" aria-label="refresh-environment" @click="checkEnvironment">
-              <RefreshCw class="h-4 w-4" />
+            <button
+              class="oc-toolbar-btn h-8 w-8 !px-0"
+              type="button"
+              aria-label="refresh-environment"
+              :disabled="refreshEnvironmentButtonState.disabled"
+              :aria-busy="refreshEnvironmentButtonState.loading"
+              @click="refreshEnvironment"
+            >
+              <component :is="refreshEnvironmentButtonState.loading ? Loader2 : RefreshCw" :class="['h-4 w-4', refreshEnvironmentButtonState.loading ? 'animate-spin' : '']" />
             </button>
-            <button class="oc-toolbar-btn h-8 px-3 text-sm" type="button" aria-label="open-dashboard" @click="openDashboard">
-              <ExternalLink class="h-4 w-4" />
-              Dashboard
+            <button
+              v-if="showDashboardButton"
+              class="oc-toolbar-btn h-8 px-3 text-sm"
+              type="button"
+              aria-label="open-dashboard"
+              :disabled="dashboardButtonState.disabled"
+              :aria-busy="dashboardButtonState.loading"
+              @click="openDashboard"
+            >
+              <component :is="dashboardButtonState.loading ? Loader2 : ExternalLink" :class="['h-4 w-4', dashboardButtonState.loading ? 'animate-spin' : '']" />
+              {{ dashboardButtonLabel }}
             </button>
           </div>
         </header>
@@ -921,10 +1206,15 @@ onUnmounted(() => {
           <div class="h-full oc-main-scroll">
             <div
               class="oc-main-scroll-page"
-              :class="{ 'oc-main-scroll-page-fixed': !isGateActive && (activeNav === 'channels' || activeNav === 'overview' || activeNav === 'diagnostics' || activeNav === 'ai-config') }"
+              :class="{
+                'oc-main-scroll-page-fixed': gateInstallLayoutFixed || (!isGateActive && (activeNav === 'channels' || activeNav === 'overview' || activeNav === 'diagnostics' || activeNav === 'ai-config'))
+              }"
             >
               <template v-if="isGateActive">
-                <div class="oc-panel p-6">
+                <div
+                  v-if="gateState === 'NO_TARGET' || (gateState === 'NEED_INSTALL' && targetMode === 'ssh') || (gateState === 'NEED_CONFIG' && targetMode === 'ssh')"
+                  class="oc-panel p-6"
+                >
                 <h3 class="text-xl font-semibold" style="color: var(--oc-text-primary);">
                   {{
                     gateState === 'NO_TARGET'
@@ -972,7 +1262,7 @@ onUnmounted(() => {
                   </button>
                 </div>
 
-                <div v-else-if="gateState === 'NEED_INSTALL'" class="mt-4 space-y-3">
+                <div v-else-if="gateState === 'NEED_INSTALL' && targetMode === 'ssh'" class="mt-4 space-y-3">
                   <div class="rounded-[12px] border px-3 py-2 text-sm" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated); color: var(--oc-text-secondary);">
                     当前环境：<strong style="color: var(--oc-text-primary);">{{ targetMode === 'ssh' ? 'SSH' : '本地' }}</strong>
                   </div>
@@ -1014,9 +1304,17 @@ onUnmounted(() => {
                 </div>
                 </div>
 
+                <QuickSetupGuide
+                  v-else-if="gateState === 'NEED_CONFIG' && targetMode === 'local' && envStatus"
+                  class="h-full"
+                  :show-toast="showToast"
+                  :system-os="envStatus.system.os"
+                  @complete="handleQuickSetupComplete"
+                />
+
                 <InstallPage
-                  v-if="gateState === 'NEED_INSTALL' && targetMode === 'local'"
-                  class="mt-3"
+                  v-else-if="gateState === 'NEED_INSTALL' && targetMode === 'local'"
+                  class="h-full"
                   :mode="'local'"
                   :env-connected="true"
                   :openclaw-installed="openclawInstalled"
@@ -1030,6 +1328,9 @@ onUnmounted(() => {
                 :env-status="envStatus"
                 :gateway-reachable="gatewayReachable"
                 :env-mode="currentEnv.mode"
+                :is-windows="isWindows"
+                :gateway-service-installed="gatewayServiceInstalled"
+                :pending-tool-id="pendingToolId"
                 @open-tool="openToolPanel"
               />
 
@@ -1124,6 +1425,56 @@ onUnmounted(() => {
                     {{ browserSettingError }}
                   </p>
                 </section>
+
+                <section v-if="showOpenClawUninstallAction" class="oc-panel p-6">
+                  <div class="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h4 class="text-lg font-semibold" style="color: var(--oc-text-primary);">危险操作</h4>
+                      <p class="mt-1 text-sm" style="color: var(--oc-text-muted);">
+                        卸载本机 OpenClaw 全局 npm 包，并移除后台网关服务。
+                      </p>
+                    </div>
+                    <span
+                      class="rounded-[10px] border px-2.5 py-1 text-xs"
+                      style="border-color: color-mix(in srgb, var(--oc-danger) 24%, var(--oc-card-border)); color: var(--oc-danger);"
+                    >
+                      仅本地环境
+                    </span>
+                  </div>
+
+                  <div
+                    class="mt-4 rounded-[12px] border p-4"
+                    style="border-color: color-mix(in srgb, var(--oc-danger) 24%, var(--oc-card-border)); background: color-mix(in srgb, var(--oc-danger) 6%, var(--oc-card));"
+                  >
+                    <div class="flex flex-wrap items-start justify-between gap-4">
+                      <div class="max-w-2xl">
+                        <p class="text-sm font-medium" style="color: var(--oc-text-primary);">卸载 OpenClaw</p>
+                        <p class="mt-1 text-xs leading-6" style="color: var(--oc-text-muted);">
+                          会删除全局 <code>openclaw</code> npm 包并卸载网关后台服务。Windows 下也会尝试卸载通过
+                          <code>nssm</code> 安装的 <code>openclaw-gateway</code> 服务；最后一步可选择是否删除
+                          <code>~/.openclaw</code>。
+                        </p>
+                      </div>
+
+                      <Button
+                        variant="destructive"
+                        :disabled="openClawUninstallActionState.disabled"
+                        :title="openClawUninstallActionState.reason || '卸载 OpenClaw'"
+                        @click="openOpenClawUninstallFlow"
+                      >
+                        卸载 OpenClaw
+                      </Button>
+                    </div>
+                  </div>
+
+                  <p
+                    v-if="openClawUninstallActionState.reason"
+                    class="mt-3 text-xs"
+                    style="color: var(--oc-text-muted);"
+                  >
+                    {{ openClawUninstallActionState.reason }}
+                  </p>
+                </section>
               </div>
             </div>
           </div>
@@ -1145,6 +1496,133 @@ onUnmounted(() => {
       @reject="rejectFingerprint"
     />
 
+    <div
+      v-if="uninstallOpenClawStep === 'confirm'"
+      class="oc-modal-overlay"
+      @click.self="closeOpenClawUninstallFlow"
+    >
+      <Card class="oc-modal-card w-full max-w-lg p-6">
+        <h3 class="text-lg font-semibold" style="color: var(--oc-text-primary);">确认卸载 OpenClaw</h3>
+        <p class="mt-1 text-sm leading-6" style="color: var(--oc-text-muted);">
+          卸载会按安装流程反向清理当前用户下的 OpenClaw 组件；本步骤默认保留 <code>~/.openclaw</code>，下一步可选是否一并删除配置目录。
+        </p>
+
+        <ul class="mt-4 space-y-2 text-sm leading-6" style="color: var(--oc-text-secondary);">
+          <li v-for="item in uninstallCleanupItemsWithoutConfig" :key="item" class="flex gap-2">
+            <span style="color: var(--oc-danger);">•</span>
+            <span>{{ item }}</span>
+          </li>
+        </ul>
+
+        <div class="mt-5 flex justify-end gap-2">
+          <Button variant="outline" :disabled="uninstallOpenClawLoading" @click="closeOpenClawUninstallFlow">
+            取消
+          </Button>
+          <Button variant="destructive" :disabled="uninstallOpenClawLoading" @click="continueOpenClawUninstallFlow">
+            继续卸载
+          </Button>
+        </div>
+      </Card>
+    </div>
+
+    <div
+      v-if="uninstallOpenClawStep === 'phrase'"
+      class="oc-modal-overlay"
+      @click.self="closeOpenClawUninstallFlow"
+    >
+      <Card class="oc-modal-card w-full max-w-lg p-6">
+        <h3 class="text-lg font-semibold" style="color: var(--oc-text-primary);">输入确认短语</h3>
+        <p class="mt-1 text-sm leading-6" style="color: var(--oc-text-muted);">
+          请输入下面的确认短语后继续卸载。
+        </p>
+
+        <div class="mt-4 rounded-[14px] border p-3" style="border-color: color-mix(in srgb, var(--oc-danger) 28%, transparent); background: color-mix(in srgb, var(--oc-danger) 8%, transparent);">
+          <div class="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              class="rounded-[10px] px-3 py-2 text-sm font-bold transition-opacity hover:opacity-85"
+              style="background: color-mix(in srgb, var(--oc-danger) 14%, transparent); color: var(--oc-danger);"
+              :disabled="uninstallOpenClawLoading"
+              @click="copyOpenClawUninstallPhrase"
+            >
+              {{ OPENCLAW_UNINSTALL_CONFIRM_PHRASE }}
+            </button>
+            <Button variant="outline" size="sm" :disabled="uninstallOpenClawLoading" @click="copyOpenClawUninstallPhrase">
+              点击复制
+            </Button>
+          </div>
+        </div>
+
+        <div class="mt-4">
+          <Input
+            :model-value="uninstallOpenClawInput"
+            :placeholder="OPENCLAW_UNINSTALL_CONFIRM_PHRASE"
+            :disabled="uninstallOpenClawLoading"
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck="false"
+            @update:model-value="uninstallOpenClawInput = String($event)"
+          />
+        </div>
+
+        <p
+          class="mt-2 text-xs"
+          :style="{ color: uninstallOpenClawInput && !uninstallOpenClawPhraseValid ? 'var(--oc-danger)' : 'var(--oc-text-quiet)' }"
+        >
+          {{
+            uninstallOpenClawInput && !uninstallOpenClawPhraseValid
+              ? '确认短语不匹配，请完整输入。'
+              : `请完整输入：${OPENCLAW_UNINSTALL_CONFIRM_PHRASE}`
+          }}
+        </p>
+
+        <div class="mt-5 flex justify-end gap-2">
+          <Button variant="outline" :disabled="uninstallOpenClawLoading" @click="closeOpenClawUninstallFlow">
+            取消
+          </Button>
+          <Button
+            variant="destructive"
+            :disabled="uninstallOpenClawLoading || !uninstallOpenClawPhraseValid"
+            @click="confirmOpenClawUninstallPhraseStep"
+          >
+            继续
+          </Button>
+        </div>
+      </Card>
+    </div>
+
+    <div
+      v-if="uninstallOpenClawStep === 'config'"
+      class="oc-modal-overlay"
+      @click.self="closeOpenClawUninstallFlow"
+    >
+      <Card class="oc-modal-card w-full max-w-lg p-6">
+        <h3 class="text-lg font-semibold" style="color: var(--oc-text-primary);">是否删除 ~/.openclaw</h3>
+        <p class="mt-1 text-sm leading-6" style="color: var(--oc-text-muted);">
+          如果一并删除，将把本地配置、工作区、缓存、日志和托管运行时一起清理，同时回收为 OpenClaw 写入的用户环境配置。
+        </p>
+
+        <ul class="mt-4 space-y-2 text-sm leading-6" style="color: var(--oc-text-secondary);">
+          <li v-for="item in uninstallCleanupItemsWithConfig" :key="item" class="flex gap-2">
+            <span style="color: var(--oc-danger);">•</span>
+            <span>{{ item }}</span>
+          </li>
+        </ul>
+
+        <div class="mt-5 flex flex-wrap justify-end gap-2">
+          <Button variant="outline" :disabled="uninstallOpenClawLoading" @click="closeOpenClawUninstallFlow">
+            取消
+          </Button>
+          <Button variant="outline" :disabled="uninstallOpenClawLoading" @click="runOpenClawUninstall(false)">
+            仅卸载，不删配置
+          </Button>
+          <Button variant="destructive" :disabled="uninstallOpenClawLoading" @click="runOpenClawUninstall(true)">
+            删除配置并卸载
+          </Button>
+        </div>
+      </Card>
+    </div>
     <Toast v-if="toast" :type="toast.type" :message="toast.message" @close="closeToast" />
 
     <div v-if="loading" class="fixed inset-0 z-[110] flex items-center justify-center bg-black/30 backdrop-blur-[1px]">

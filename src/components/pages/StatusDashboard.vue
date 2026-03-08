@@ -2,7 +2,13 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/tauri'
 import { listen } from '@tauri-apps/api/event'
-import { Play, Square, RotateCcw, Stethoscope, ChevronDown, ChevronUp, RefreshCw } from 'lucide-vue-next'
+import { Play, Square, RotateCcw, Stethoscope, ChevronDown, ChevronUp, RefreshCw, Wrench, Loader2 } from 'lucide-vue-next'
+import {
+  resolveGatewayQuickActionGridColumns,
+  resolveGatewayQuickActionState,
+  shouldShowInstallGatewayServiceAction,
+} from '../../domain/gatewayServiceAction'
+import { resolveAsyncButtonLabel, resolveAsyncButtonState } from '../../domain/asyncButtonState'
 import type { EnvironmentStatus } from '../../types/config'
 
 interface DashboardLogEvent {
@@ -16,11 +22,18 @@ interface DashboardLogStatusEvent {
   reason?: string | null
 }
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   envStatus: EnvironmentStatus
   gatewayReachable: boolean
   envMode: 'local' | 'ssh'
-}>()
+  isWindows?: boolean
+  gatewayServiceInstalled?: boolean
+  pendingToolId?: string | null
+}>(), {
+  isWindows: false,
+  gatewayServiceInstalled: true,
+  pendingToolId: null,
+})
 
 const emit = defineEmits<{
   openTool: [toolId: string]
@@ -29,6 +42,7 @@ const emit = defineEmits<{
 const logExpanded = ref(true)
 const logs = ref<DashboardLogEvent[]>([])
 const logsFollowing = ref(false)
+const refreshingLogs = ref(false)
 const logContainerRef = ref<HTMLDivElement>()
 
 let unlistenLogLine: (() => void) | null = null
@@ -55,7 +69,7 @@ const serviceSummary = computed(() => {
 const quickActions = computed(() => {
   const installed = props.envStatus.openclaw.installed
   const running = props.gatewayReachable
-  return [
+  const actions = [
     {
       id: running ? 'stop' : 'start',
       label: running ? '停止服务' : '启动服务',
@@ -78,7 +92,66 @@ const quickActions = computed(() => {
       disabled: !installed || props.envMode !== 'local',
     },
   ]
+
+  if (
+    shouldShowInstallGatewayServiceAction({
+      isWindows: props.isWindows,
+      envMode: props.envMode,
+      gatewayServiceInstalled: props.gatewayServiceInstalled,
+    })
+  ) {
+    actions.push({
+      id: 'install-service',
+      label: '安装网关服务',
+      icon: Wrench,
+      color: 'var(--oc-accent)',
+      disabled: !installed,
+    })
+  }
+
+  return actions.map((action) => ({
+    ...action,
+    ...resolveGatewayQuickActionState({
+      actionId: action.id,
+      baseDisabled: action.disabled,
+      pendingActionId: props.pendingToolId,
+    }),
+  }))
 })
+
+const quickActionGridColumns = computed(() =>
+  resolveGatewayQuickActionGridColumns(quickActions.value.length)
+)
+
+const resolveQuickActionLabel = (actionId: string, label: string, loading: boolean) => {
+  if (!loading) {
+    return label
+  }
+
+  const loadingLabels: Record<string, string> = {
+    start: '启动中...',
+    stop: '停止中...',
+    restart: '重启中...',
+    'install-service': '安装中...',
+  }
+
+  return loadingLabels[actionId] || `${label}...`
+}
+
+const refreshLogsButtonState = computed(() =>
+  resolveAsyncButtonState({
+    loading: refreshingLogs.value,
+    baseDisabled: props.envMode !== 'local' || logsFollowing.value,
+  })
+)
+
+const refreshLogsButtonLabel = computed(() =>
+  resolveAsyncButtonLabel({
+    loading: refreshingLogs.value,
+    label: '刷新',
+    loadingLabel: '刷新中...',
+  })
+)
 
 const levelColor = (level: string) => {
   if (level === 'error') return 'var(--oc-danger)'
@@ -123,13 +196,16 @@ const startLogFollow = async () => {
 }
 
 const refreshLogs = async () => {
-  if (props.envMode !== 'local') {
+  if (refreshLogsButtonState.value.disabled) {
     return
   }
-  if (logsFollowing.value) {
-    return
+
+  refreshingLogs.value = true
+  try {
+    await startLogFollow()
+  } finally {
+    refreshingLogs.value = false
   }
-  await startLogFollow()
 }
 
 watch(
@@ -140,6 +216,21 @@ watch(
       return
     }
     if (installed && (prevMode !== 'local' || !prevInstalled)) {
+      await startLogFollow()
+    }
+  }
+)
+
+watch(
+  () => props.gatewayReachable,
+  async (reachable, previous) => {
+    if (
+      reachable &&
+      !previous &&
+      props.envMode === 'local' &&
+      props.envStatus.openclaw.installed &&
+      !logsFollowing.value
+    ) {
       await startLogFollow()
     }
   }
@@ -178,13 +269,22 @@ onUnmounted(() => {
 
     <section class="oc-panel shrink-0 p-4">
       <h3 class="text-lg font-semibold" style="color: var(--oc-text-primary);">快捷操作</h3>
-      <div class="mt-3 grid grid-cols-2 gap-2 md:grid-cols-3">
+      <div
+        class="mt-3 grid grid-cols-2 gap-2"
+        :class="{
+          'md:grid-cols-1': quickActionGridColumns === 1,
+          'md:grid-cols-2': quickActionGridColumns === 2,
+          'md:grid-cols-3': quickActionGridColumns === 3,
+          'md:grid-cols-4': quickActionGridColumns === 4,
+        }"
+      >
         <button
           v-for="item in quickActions"
           :key="item.id"
           class="oc-subpanel px-3 py-3 text-center transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-45"
           :style="{ color: item.color }"
           :disabled="item.disabled"
+          :aria-busy="item.loading"
           @click="emit('openTool', item.id)"
         >
           <div class="mb-2 flex justify-center">
@@ -192,10 +292,10 @@ onUnmounted(() => {
               class="flex h-9 w-9 items-center justify-center rounded-full border"
               style="border-color: var(--oc-divider); background: color-mix(in srgb, var(--oc-card-elevated) 78%, transparent);"
             >
-              <component :is="item.icon" class="h-4 w-4" />
+              <component :is="item.loading ? Loader2 : item.icon" :class="['h-4 w-4', item.loading ? 'animate-spin' : '']" />
             </span>
           </div>
-          <div class="text-sm font-semibold">{{ item.label }}</div>
+          <div class="text-sm font-semibold">{{ resolveQuickActionLabel(item.id, item.label, item.loading) }}</div>
         </button>
       </div>
     </section>
@@ -211,9 +311,15 @@ onUnmounted(() => {
         </div>
 
         <div class="flex items-center gap-2">
-          <button class="oc-toolbar-btn h-8 px-3 text-xs" type="button" @click="refreshLogs">
-            <RefreshCw class="h-3.5 w-3.5" />
-            刷新
+          <button
+            class="oc-toolbar-btn h-8 px-3 text-xs"
+            type="button"
+            :disabled="refreshLogsButtonState.disabled"
+            :aria-busy="refreshLogsButtonState.loading"
+            @click="refreshLogs"
+          >
+            <component :is="refreshLogsButtonState.loading ? Loader2 : RefreshCw" :class="['h-3.5 w-3.5', refreshLogsButtonState.loading ? 'animate-spin' : '']" />
+            {{ refreshLogsButtonLabel }}
           </button>
           <button class="oc-toolbar-btn h-8 w-8 !px-0" type="button" @click="logExpanded = !logExpanded">
             <ChevronUp v-if="logExpanded" class="h-4 w-4" />
