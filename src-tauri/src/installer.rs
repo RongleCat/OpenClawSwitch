@@ -1756,12 +1756,15 @@ fn repair_managed_node_path_silently() {
         let _ = expose_active_node_to_user_path_silently();
     }
 }fn configure_fnm_path(app: &AppHandle, step: &str) -> Result<(), String> {
-    if cfg!(target_os = "windows") {
+    #[cfg(target_os = "windows")]
+    {
         emit_log(app, step, "Configuring Windows PATH...", "info");
         let home = dirs::home_dir().ok_or("无法获取用户主目录")?;
         let fnm_path = home.join(".fnm");
         persist_windows_user_path_entry(&fnm_path)?;
-    } else {
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
         let home = dirs::home_dir().ok_or("无法获取用户主目录")?;
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
 
@@ -2520,11 +2523,11 @@ pub async fn install_gateway_service(app: AppHandle) -> Result<String, String> {
 }
 /// 启动本地网关服务
 #[tauri::command]
-pub async fn start_gateway(app: AppHandle) -> Result<String, String> {
+pub async fn start_gateway(_app: AppHandle) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
-        if is_windows_gateway_service_installed(&app) {
-            return control_gateway_service_via_nssm(&app, "start");
+        if is_windows_gateway_service_installed(&_app) {
+            return control_gateway_service_via_nssm(&_app, "start");
         }
     }
 
@@ -2539,11 +2542,11 @@ pub async fn start_gateway(app: AppHandle) -> Result<String, String> {
 
 /// 停止本地网关服务
 #[tauri::command]
-pub async fn stop_gateway(app: AppHandle) -> Result<String, String> {
+pub async fn stop_gateway(_app: AppHandle) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
-        if is_windows_gateway_service_installed(&app) {
-            return control_gateway_service_via_nssm(&app, "stop");
+        if is_windows_gateway_service_installed(&_app) {
+            return control_gateway_service_via_nssm(&_app, "stop");
         }
     }
 
