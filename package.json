@@ -10,7 +10,9 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "vendor:openclaw": "node ./scripts/prepare-openclaw-vendor.mjs",
+    "vendor:windows-tools": "node ./scripts/prepare-windows-tools-vendor.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^1.5.3",
@@ -31,6 +33,6 @@
     "typescript": "^5.3.3",
     "vite": "^5.0.11",
     "vitest": "^4.0.18",
-    "vue-tsc": "^1.8.27"
+    "vue-tsc": "^3.2.5"
   }
 }

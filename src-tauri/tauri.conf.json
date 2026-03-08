@@ -1,7 +1,7 @@
 {
   "build": {
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run vendor:openclaw && npm run vendor:windows-tools && npm run build",
     "devPath": "http://localhost:1420",
     "distDir": "../dist",
     "withGlobalTauri": false
@@ -15,7 +15,11 @@
       "all": false,
       "fs": {
         "all": true,
-        "scope": ["$HOME/.openclaw/**", "$HOME/.clawdbot/**", "**"]
+        "scope": [
+          "$HOME/.openclaw/**",
+          "$HOME/.clawdbot/**",
+          "**"
+        ]
       },
       "path": {
         "all": true
@@ -36,6 +40,9 @@
     },
     "bundle": {
       "active": true,
+      "resources": [
+        "resources/**"
+      ],
       "targets": "all",
       "identifier": "com.openclawswitch.app",
       "icon": [

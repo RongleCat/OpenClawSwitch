@@ -152,3 +152,7 @@ npm run tauri:build
 - [OpenClaw](https://github.com/miaoxworld/openclaw-manager)
 - [Tauri](https://tauri.app/)
 - [Vue 3](https://vuejs.org/)
+
+## 开发验证
+
+- 开发环境验证小包全局安装：[`docs/dev-openclaw-install-test.md`](docs/dev-openclaw-install-test.md)

@@ -152,3 +152,7 @@ Issues and Pull Requests are welcome!
 - [OpenClaw](https://github.com/miaoxworld/openclaw-manager)
 - [Tauri](https://tauri.app/)
 - [Vue 3](https://vuejs.org/)
+
+## Development Validation
+
+- Small-package global install checklist: [`docs/dev-openclaw-install-test.en.md`](docs/dev-openclaw-install-test.en.md)

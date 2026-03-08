@@ -174,12 +174,6 @@ export interface GitStatusInfo {
   version: string | null
 }
 
-/** fnm 安装状态 */
-export interface FnmStatus {
-  installed: boolean
-  version: string | null
-}
-
 /** 系统信息 */
 export interface SystemInfo {
   os: 'windows' | 'macos' | 'linux'
@@ -192,7 +186,6 @@ export interface EnvironmentStatus {
   openclaw: OpenClawStatus
   node: NodeStatus
   git: GitStatusInfo
-  fnm: FnmStatus
   system: SystemInfo
   networkRegion: string
 }
@@ -232,13 +225,6 @@ export interface InstallDownloadEvent {
   total: number
 }
 
-/** 步骤耗时事件 */
-export interface InstallStepTimingEvent {
-  step: string
-  startTime: number
-  endTime: number
-  duration: number
-}
 
 // ============================================================================
 // 导航相关类型
