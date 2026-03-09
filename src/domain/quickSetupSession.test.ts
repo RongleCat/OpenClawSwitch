@@ -7,6 +7,7 @@ import {
   loadQuickSetupSession,
   resolveQuickSetupSessionStepIndex,
   saveQuickSetupSession,
+  shouldPersistQuickSetupSession,
   shouldClearQuickSetupSessionAfterInstall,
   shouldClearQuickSetupSessionForEnvironment,
   shouldResumeQuickSetupSession,
@@ -47,6 +48,29 @@ describe('quick setup session snapshot', () => {
   it('clears quick setup cache after local install completes', () => {
     expect(shouldClearQuickSetupSessionAfterInstall('local')).toBe(true)
     expect(shouldClearQuickSetupSessionAfterInstall('ssh')).toBe(false)
+  })
+
+  it('does not re-persist a quick setup session after install has disabled persistence', () => {
+    expect(
+      shouldPersistQuickSetupSession({
+        restoringSession: false,
+        persistenceDisabled: true,
+      })
+    ).toBe(false)
+
+    expect(
+      shouldPersistQuickSetupSession({
+        restoringSession: true,
+        persistenceDisabled: false,
+      })
+    ).toBe(false)
+
+    expect(
+      shouldPersistQuickSetupSession({
+        restoringSession: false,
+        persistenceDisabled: false,
+      })
+    ).toBe(true)
   })
 })
 

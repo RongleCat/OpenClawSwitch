@@ -39,6 +39,7 @@ import {
   loadQuickSetupSession,
   resolveQuickSetupSessionStepIndex,
   saveQuickSetupSession,
+  shouldPersistQuickSetupSession,
   type QuickSetupSessionStatus,
 } from '../../domain/quickSetupSession'
 import { resolveDingtalkChannelNode } from '../../domain/dingtalkPlugin'
@@ -93,6 +94,7 @@ const toolsFullProfileEnabled = ref(false)
 
 const savedStepIds = ref<QuickSetupStepId[]>([])
 const restoringSession = ref(false)
+const sessionPersistenceDisabled = ref(false)
 
 const currentStep = computed(() => QUICK_SETUP_STEPS[stepIndex.value])
 const canRelaunchAsAdmin = computed(() => isAdminRequiredGatewayInstallError(errorMessage.value))
@@ -171,7 +173,10 @@ const markStepSaved = (stepId: QuickSetupStepId) => {
 }
 
 const persistQuickSetupSession = (status: QuickSetupSessionStatus = 'in_progress') => {
-  if (restoringSession.value) return
+  if (!shouldPersistQuickSetupSession({
+    restoringSession: restoringSession.value,
+    persistenceDisabled: sessionPersistenceDisabled.value,
+  })) return
   const currentStepId = QUICK_SETUP_STEPS[stepIndex.value]?.id ?? 'model'
   saveQuickSetupSession(createQuickSetupSessionSnapshot({
     status,
@@ -186,6 +191,11 @@ const persistQuickSetupSession = (status: QuickSetupSessionStatus = 'in_progress
     browserDefaultProfileEnabled: browserDefaultProfileEnabled.value,
     toolsFullProfileEnabled: toolsFullProfileEnabled.value,
   }))
+}
+
+const stopQuickSetupSessionPersistence = () => {
+  sessionPersistenceDisabled.value = true
+  clearQuickSetupSession()
 }
 
 const restoreQuickSetupSessionState = () => {
@@ -532,7 +542,7 @@ const relaunchAsAdmin = async () => {
 
 const closeQuickSetup = () => {
   if (busy.value || adminRelaunching.value) return
-  clearQuickSetupSession()
+  stopQuickSetupSessionPersistence()
   emit('close')
 }
 
@@ -567,8 +577,8 @@ const installGatewayAndEnterDashboard = async () => {
       throw new Error('网关在预期时间内未完成启动，请稍后重试')
     }
 
+    stopQuickSetupSessionPersistence()
     markStepSaved('gateway')
-    clearQuickSetupSession()
     infoMessage.value = '快速引导完成，正在进入工作台。'
     props.showToast('success', '网关已启动，正在进入工作台')
     emit('complete')

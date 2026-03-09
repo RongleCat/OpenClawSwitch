@@ -12,6 +12,11 @@ export const QUICK_SETUP_SESSION_TTL_MS = 24 * 60 * 60 * 1000
 export type QuickSetupSessionStatus = 'in_progress' | 'awaiting_admin_relaunch'
 export type QuickSetupSessionEnvMode = 'local' | 'ssh'
 
+export interface QuickSetupSessionPersistenceInput {
+  restoringSession: boolean
+  persistenceDisabled: boolean
+}
+
 export interface QuickSetupSessionSnapshot {
   version: number
   status: QuickSetupSessionStatus
@@ -88,6 +93,9 @@ export const shouldClearQuickSetupSessionForEnvironment = (
 
 export const shouldClearQuickSetupSessionAfterInstall = (envMode: QuickSetupSessionEnvMode) =>
   envMode === 'local'
+
+export const shouldPersistQuickSetupSession = (input: QuickSetupSessionPersistenceInput) =>
+  !input.restoringSession && !input.persistenceDisabled
 
 export const saveQuickSetupSession = (snapshot: QuickSetupSessionSnapshot, storage?: QuickSetupSessionStorage | null) => {
   const targetStorage = resolveStorage(storage)
