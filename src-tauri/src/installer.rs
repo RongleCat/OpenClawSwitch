@@ -509,7 +509,9 @@ mod installer_tests {
         build_windows_gateway_service_install_script,
         build_windows_nssm_service_install_args,
         build_windows_relaunch_as_admin_command,
+        git_install_is_blocking_in_full_install,
         prefer_windows_command_wrapper,
+        windows_git_path_entries,
     };
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -655,6 +657,38 @@ mod installer_tests {
             format!(r"C:\tools;C:\Windows\System32;{}", target.display())
         );
     }
+
+    #[test]
+    fn windows_git_path_entries_include_root_and_executable_dirs() {
+        let dir = make_temp_dir("bundled-git");
+        let cmd_dir = dir.join("cmd");
+        let mingw_bin_dir = dir.join("mingw64").join("bin");
+        let usr_bin_dir = dir.join("usr").join("bin");
+        std::fs::create_dir_all(&cmd_dir).expect("create cmd dir");
+        std::fs::create_dir_all(&mingw_bin_dir).expect("create mingw64 bin dir");
+        std::fs::create_dir_all(&usr_bin_dir).expect("create usr bin dir");
+        std::fs::write(cmd_dir.join("git.exe"), "git").expect("write cmd git");
+        std::fs::write(mingw_bin_dir.join("git.exe"), "git").expect("write mingw64 git");
+
+        let entries = windows_git_path_entries(&dir);
+
+        assert_eq!(
+            entries,
+            vec![
+                dir.clone(),
+                cmd_dir.clone(),
+                mingw_bin_dir.clone(),
+                usr_bin_dir.clone(),
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn windows_full_install_treats_git_as_required() {
+        assert!(git_install_is_blocking_in_full_install());
+    }
 }
 
 fn detect_openclaw_root_from_bin_path() -> Option<PathBuf> {
@@ -784,6 +818,14 @@ fn managed_runtime_root() -> Result<PathBuf, String> {
 
 fn managed_node_root() -> Result<PathBuf, String> {
     Ok(managed_runtime_root()?.join("node"))
+}
+
+fn managed_git_root() -> Result<PathBuf, String> {
+    Ok(managed_runtime_root()?.join("git"))
+}
+
+fn managed_git_install_dir() -> Result<PathBuf, String> {
+    Ok(managed_git_root()?.join("mingit"))
 }
 
 fn managed_npm_prefix() -> Result<PathBuf, String> {
@@ -1930,6 +1972,36 @@ fn extract_fnm_zip(
 }
 
 /// 配置 fnm PATH
+fn extract_zip_archive_to_dir<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    target_dir: &Path,
+) -> Result<(), String> {
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .map_err(|error| format!("读取压缩文件失败: {}", error))?;
+        let outpath = target_dir.join(file.name());
+
+        if file.name().ends_with('/') {
+            std::fs::create_dir_all(&outpath)
+                .map_err(|error| format!("创建目录失败: {}", error))?;
+            continue;
+        }
+
+        if let Some(parent) = outpath.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("创建目录失败: {}", error))?;
+        }
+
+        let mut outfile = std::fs::File::create(&outpath)
+            .map_err(|error| format!("创建文件失败: {}", error))?;
+        std::io::copy(&mut file, &mut outfile)
+            .map_err(|error| format!("写入文件失败: {}", error))?;
+    }
+
+    Ok(())
+}
+
 #[cfg(target_os = "windows")]
 fn ensure_windows_process_path(dir: &Path) -> Result<(), String> {
     let current = std::env::var_os("PATH").unwrap_or_default();
@@ -1982,6 +2054,52 @@ fn append_windows_user_path_entry(current: &str, dir: &Path) -> Option<String> {
         segments.push(target);
         Some(segments.join(";"))
     }
+}
+
+fn windows_git_path_entries(install_dir: &Path) -> Vec<PathBuf> {
+    let candidates = [
+        install_dir.to_path_buf(),
+        install_dir.join("cmd"),
+        install_dir.join("mingw64").join("bin"),
+        install_dir.join("usr").join("bin"),
+    ];
+
+    let mut entries = Vec::new();
+    for candidate in candidates {
+        if candidate.exists() && !entries.iter().any(|existing| existing == &candidate) {
+            entries.push(candidate);
+        }
+    }
+
+    entries
+}
+
+fn windows_git_install_dir_has_binary(path: &Path) -> bool {
+    windows_git_path_entries(path)
+        .into_iter()
+        .any(|entry| entry.join("git.exe").is_file())
+}
+
+fn find_directory_containing_windows_git_binary(root: &Path) -> Option<PathBuf> {
+    if windows_git_install_dir_has_binary(root) {
+        return Some(root.to_path_buf());
+    }
+
+    let entries = std::fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_directory_containing_windows_git_binary(&path) {
+                return Some(found);
+            }
+        }
+    }
+
+    None
+}
+
+fn git_install_is_blocking_in_full_install() -> bool {
+    cfg!(target_os = "windows")
 }
 
 #[cfg(target_os = "windows")]
@@ -2045,6 +2163,151 @@ fn expose_active_node_to_user_path_silently() -> Result<Option<PathBuf>, String>
         let _ = persist_windows_user_path_entry(&npm_bin_dir);
     }
     Ok(Some(node_bin_dir))
+}
+
+#[cfg(target_os = "windows")]
+fn bundled_git_resource_candidates() -> &'static [&'static str] {
+    &[
+        "windows/git/mingit.zip",
+        "resources/windows/git/mingit.zip",
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_bundled_git_archive(app: &AppHandle) -> Option<PathBuf> {
+    for relative in bundled_git_resource_candidates() {
+        if let Some(path) = app.path_resolver().resolve_resource(relative) {
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+
+    let local_candidates = [
+        PathBuf::from("src-tauri")
+            .join("resources")
+            .join("windows")
+            .join("git")
+            .join("mingit.zip"),
+        PathBuf::from("resources")
+            .join("windows")
+            .join("git")
+            .join("mingit.zip"),
+    ];
+
+    local_candidates.into_iter().find(|path| path.exists())
+}
+
+#[cfg(target_os = "windows")]
+fn extract_managed_git_archive(data: &[u8]) -> Result<PathBuf, String> {
+    let root = managed_git_root()?;
+    std::fs::create_dir_all(&root)
+        .map_err(|error| format!("创建 Git 运行时目录失败: {}", error))?;
+
+    let temp_dir = root.join(format!(".tmp-{}", now_ms()));
+    std::fs::create_dir_all(&temp_dir)
+        .map_err(|error| format!("创建 Git 临时目录失败: {}", error))?;
+
+    let cursor = std::io::Cursor::new(data);
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|error| format!("解压 Git 压缩包失败: {}", error))?;
+    extract_zip_archive_to_dir(&mut archive, &temp_dir)?;
+
+    let extracted_home = find_directory_containing_windows_git_binary(&temp_dir)
+        .ok_or_else(|| "未找到解压后的 Git 目录".to_string())?;
+    let final_dir = managed_git_install_dir()?;
+    if final_dir.exists() {
+        std::fs::remove_dir_all(&final_dir)
+            .map_err(|error| format!("清理旧 Git 目录失败: {}", error))?;
+    }
+    if let Some(parent) = final_dir.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("创建 Git 目录失败: {}", error))?;
+    }
+
+    match std::fs::rename(&extracted_home, &final_dir) {
+        Ok(_) => {}
+        Err(_) => copy_dir_all(&extracted_home, &final_dir)?,
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(final_dir)
+}
+
+#[cfg(target_os = "windows")]
+fn expose_windows_git_to_user_path_silently(install_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let entries = windows_git_path_entries(install_dir);
+    if entries.is_empty() {
+        return Err("Git 安装目录缺少可用 PATH 条目".to_string());
+    }
+
+    ensure_process_path_entries(&entries)?;
+    persist_path_entries_to_user(&entries)?;
+    Ok(entries)
+}
+
+#[cfg(target_os = "windows")]
+fn install_bundled_windows_git(app: &AppHandle, step: &str) -> Result<PathBuf, String> {
+    let existing_install_dir = managed_git_install_dir()?;
+    if windows_git_install_dir_has_binary(&existing_install_dir) {
+        let entries = expose_windows_git_to_user_path_silently(&existing_install_dir)?;
+        emit_log(
+            app,
+            step,
+            &format!("复用已解压的内置 Git: {}", existing_install_dir.display()),
+            "info",
+        );
+        emit_log(
+            app,
+            step,
+            &format!(
+                "Git PATH 已更新: {}",
+                entries
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(";")
+            ),
+            "info",
+        );
+        if check_git_installed().installed {
+            return Ok(existing_install_dir);
+        }
+        return Err("已找到内置 Git，但当前进程仍无法调用 git 命令".to_string());
+    }
+
+    let archive_path = resolve_bundled_git_archive(app)
+        .ok_or_else(|| "未找到安装包内置的 Git 离线安装包".to_string())?;
+    emit_log(
+        app,
+        step,
+        &format!("Windows: 使用内置 Git 离线包安装: {}", archive_path.display()),
+        "info",
+    );
+
+    let archive_data = std::fs::read(&archive_path)
+        .map_err(|error| format!("读取 Git 离线安装包失败: {}", error))?;
+    let install_dir = extract_managed_git_archive(&archive_data)?;
+    let entries = expose_windows_git_to_user_path_silently(&install_dir)?;
+    emit_log(
+        app,
+        step,
+        &format!(
+            "Git PATH 已更新: {}",
+            entries
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(";")
+        ),
+        "info",
+    );
+
+    if !check_git_installed().installed {
+        return Err("Git 离线包已解压，但 git 命令仍不可用".to_string());
+    }
+
+    Ok(install_dir)
 }
 
 fn has_managed_runtime_artifacts() -> bool {
@@ -2264,6 +2527,14 @@ pub async fn install_openclaw(app: AppHandle, use_china_mirror: bool) -> Result<
 #[tauri::command]
 pub async fn install_git(app: AppHandle) -> Result<String, String> {
     let step = "install_git";
+    #[cfg(target_os = "windows")]
+    {
+        emit_log(&app, step, "Windows: 使用安装包内置 Git 离线包安装...", "info");
+        let install_dir = install_bundled_windows_git(&app, step)?;
+        emit_log(&app, step, &format!("Git 安装成功: {}", install_dir.display()), "success");
+        return Ok("Git 安装成功".to_string());
+    }
+    #[cfg(not(target_os = "windows"))]
     emit_log(&app, step, "开始安装 Git...", "info");
 
     #[cfg(target_os = "macos")]
@@ -2282,22 +2553,6 @@ pub async fn install_git(app: AppHandle) -> Result<String, String> {
                     return Ok("Git 已安装".to_string());
                 }
                 return Err("Git 安装失败，请手动安装: https://git-scm.com/download/mac".to_string());
-            }
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        // Windows: 尝试 winget
-        emit_log(&app, step, "Windows: 尝试通过 winget 安装 Git...", "info");
-        match run_shell_with_log(&app, step, "winget install Git.Git --silent --accept-package-agreements --accept-source-agreements") {
-            Ok(_) => {
-                emit_log(&app, step, "Git 安装成功!", "success");
-                return Ok("Git 安装成功".to_string());
-            }
-            Err(_) => {
-                emit_log(&app, step, "winget 安装失败，请手动下载安装", "warn");
-                return Err("Git 安装失败，请手动下载: https://git-scm.com/download/win".to_string());
             }
         }
     }
@@ -2371,6 +2626,12 @@ pub async fn run_full_install(app: AppHandle) -> Result<String, String> {
     }
 
     emit_progress(&app, 3, total_steps, "安装 Node.js", "running");
+    if git_install_is_blocking_in_full_install() && !check_git_installed().installed {
+        emit_log(&app, "install_git", "Git is required before continuing.", "error");
+        emit_progress(&app, 2, total_steps, "安装 Git", "error");
+        return Err("Git 安装失败，已停止后续安装".to_string());
+    }
+
     if env.node.meets_requirement {
         expose_managed_runtime_to_user_path_silently()?;
         emit_log(&app, "install_node", "Node.js >= 22 已满足要求，跳过安装", "success");
