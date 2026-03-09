@@ -28,8 +28,20 @@ import { deriveAppState } from './domain/appState'
 import { NAV_ITEMS, type NavPage } from './domain/navigation'
 import { isPrimaryModelPlaceholder } from './domain/configValidation'
 import { shouldShowDashboardButton } from './domain/dashboardVisibility'
-import { resolveGateTopbarTitle, shouldUseFixedGateInstallLayout } from './domain/gateInstallLayout'
-import { waitForGatewayReady } from './domain/gatewayStartup'
+import {
+  resolveGateTopbarTitle,
+  shouldRenderQuickSetupCloseAction,
+  shouldRenderQuickSetupGuide,
+  shouldRenderSidebar,
+  shouldUseFixedMainContentLayout,
+} from './domain/gateInstallLayout'
+import {
+  clearQuickSetupSession,
+  loadQuickSetupSession,
+  shouldClearQuickSetupSessionAfterInstall,
+  shouldClearQuickSetupSessionForEnvironment,
+} from './domain/quickSetupSession'
+import { DEFAULT_GATEWAY_READY_OPTIONS, waitForGatewayReady } from './domain/gatewayStartup'
 import {
   OPENCLAW_UNINSTALL_CONFIRM_PHRASE,
   canConfirmOpenClawUninstallPhrase,
@@ -98,6 +110,8 @@ const environmentRefreshing = ref(false)
 const loading = ref(false)
 const loadingMessage = ref('加载中...')
 const activeNav = ref<NavPage>('overview')
+const quickSetupDebugOpen = ref(false)
+const quickSetupResumePending = ref(Boolean(loadQuickSetupSession()))
 
 const toast = ref<{ type: 'success' | 'error'; message: string } | null>(null)
 let toastTimer: ReturnType<typeof setTimeout> | null = null
@@ -179,12 +193,33 @@ const navMeta: Record<NavPage, { title: string; subtitle: string }> = {
 }
 
 const pageMeta = computed(() => navMeta[activeNav.value])
+const quickSetupForcedOpen = computed(() => quickSetupDebugOpen.value || quickSetupResumePending.value)
+const shouldShowSidebar = computed(() => shouldRenderSidebar(isGateActive.value, quickSetupForcedOpen.value))
+const shouldShowQuickSetupCloseAction = computed(() =>
+  shouldRenderQuickSetupCloseAction(isGateActive.value, quickSetupDebugOpen.value)
+)
 const topbarTitle = computed(() => {
+  if (quickSetupForcedOpen.value) return '安装与接入 · 快速引导调试'
   if (!isGateActive.value) return pageMeta.value.title
   return resolveGateTopbarTitle(gateState.value, targetMode.value)
 })
-const gateInstallLayoutFixed = computed(() =>
-  shouldUseFixedGateInstallLayout(gateState.value, targetMode.value)
+const fixedMainContentLayout = computed(() =>
+  shouldUseFixedMainContentLayout(
+    isGateActive.value,
+    gateState.value,
+    targetMode.value,
+    activeNav.value,
+    quickSetupForcedOpen.value,
+  )
+)
+const shouldShowQuickSetupGuide = computed(() =>
+  shouldRenderQuickSetupGuide(
+    isGateActive.value,
+    gateState.value,
+    targetMode.value,
+    quickSetupForcedOpen.value,
+    Boolean(envStatus.value),
+  )
 )
 const themeModeLabel = computed(() => {
   if (themeMode.value === 'light') return '浅色'
@@ -403,8 +438,8 @@ const checkGatewayHealth = async (): Promise<boolean> => {
 
 const waitForGatewayReadyWithMessage = async (
   message: string,
-  maxAttempts = 30,
-  intervalMs = 2000
+  maxAttempts = DEFAULT_GATEWAY_READY_OPTIONS.maxAttempts,
+  intervalMs = DEFAULT_GATEWAY_READY_OPTIONS.intervalMs
 ): Promise<boolean> => {
   let attempts = 0
   return waitForGatewayReady(
@@ -528,6 +563,12 @@ const checkEnvironment = async () => {
       envStatus.value = await invoke<EnvironmentStatus>('check_environment')
     }
 
+    if (envStatus.value && shouldClearQuickSetupSessionForEnvironment(currentEnv.value.mode, envStatus.value.openclaw.installed)) {
+      clearQuickSetupSession()
+      quickSetupResumePending.value = false
+      quickSetupDebugOpen.value = false
+    }
+
     await syncConfigSignals()
     await syncGatewayServiceInstallState()
   } catch {
@@ -583,7 +624,18 @@ const navigateTo = (target: NavPage) => {
     return
   }
 
+  if (target !== 'overview') {
+    quickSetupDebugOpen.value = false
+  }
   activeNav.value = target
+}
+
+const openQuickSetupDebug = async () => {
+  targetMode.value = 'local'
+  quickSetupDebugOpen.value = true
+  if (!envStatus.value) {
+    await checkEnvironment()
+  }
 }
 
 watch(
@@ -594,11 +646,13 @@ watch(
     }
 
     if (gateState.value === 'NO_TARGET' || gateState.value === 'NEED_INSTALL') {
+      quickSetupDebugOpen.value = false
       activeNav.value = 'overview'
       return
     }
 
     if (gateState.value === 'NEED_CONFIG') {
+      quickSetupDebugOpen.value = false
       activeNav.value = 'overview'
       return
     }
@@ -929,10 +983,7 @@ const openToolPanel = async (toolId: string) => {
     await runWithPendingTool(toolId, async () => {
       try {
         await invoke('install_gateway_service')
-        const ready = await waitForGatewayReady(checkGatewayHealth, {
-          maxAttempts: 20,
-          intervalMs: 1000,
-        })
+        const ready = await waitForGatewayReady(checkGatewayHealth, DEFAULT_GATEWAY_READY_OPTIONS)
         if (!ready) {
           throw new Error('服务安装成功，但网关在预期时间内未对外提供服务')
         }
@@ -958,10 +1009,7 @@ const openToolPanel = async (toolId: string) => {
         } else {
           await invoke('restart_gateway')
         }
-        const ready = await waitForGatewayReady(checkGatewayHealth, {
-          maxAttempts: 20,
-          intervalMs: 1000,
-        })
+        const ready = await waitForGatewayReady(checkGatewayHealth, DEFAULT_GATEWAY_READY_OPTIONS)
         if (!ready) {
           throw new Error('重启命令已发送，但网关在预期时间内未恢复可访问')
         }
@@ -992,10 +1040,7 @@ const openToolPanel = async (toolId: string) => {
         } else {
           await invoke('start_gateway')
         }
-        const ready = await waitForGatewayReady(checkGatewayHealth, {
-          maxAttempts: 20,
-          intervalMs: 1000,
-        })
+        const ready = await waitForGatewayReady(checkGatewayHealth, DEFAULT_GATEWAY_READY_OPTIONS)
         if (!ready) {
           throw new Error('启动命令已发送，但网关在预期时间内未进入可访问状态')
         }
@@ -1031,6 +1076,11 @@ const openToolPanel = async (toolId: string) => {
 const handleInstallComplete = async () => {
   targetMode.value = 'local'
   lastActionFailed.value = false
+  if (shouldClearQuickSetupSessionAfterInstall('local')) {
+    clearQuickSetupSession()
+    quickSetupResumePending.value = false
+    quickSetupDebugOpen.value = false
+  }
   activeNav.value = 'overview'
   await checkEnvironment()
 }
@@ -1038,8 +1088,15 @@ const handleInstallComplete = async () => {
 const handleQuickSetupComplete = async () => {
   targetMode.value = 'local'
   lastActionFailed.value = false
+  quickSetupDebugOpen.value = false
+  quickSetupResumePending.value = false
   activeNav.value = 'overview'
   await checkEnvironment()
+}
+
+const handleQuickSetupClose = () => {
+  quickSetupDebugOpen.value = false
+  quickSetupResumePending.value = false
 }
 
 onMounted(async () => {
@@ -1058,7 +1115,7 @@ onUnmounted(() => {
 <template>
   <div class="oc-app-shell">
     <div class="oc-app-window">
-      <aside v-if="!isGateActive" class="oc-sidebar">
+      <aside v-if="shouldShowSidebar" class="oc-sidebar">
         <div class="oc-sidebar-header">
           <div class="flex items-center gap-2.5">
             <img
@@ -1207,12 +1264,12 @@ onUnmounted(() => {
             <div
               class="oc-main-scroll-page"
               :class="{
-                'oc-main-scroll-page-fixed': gateInstallLayoutFixed || (!isGateActive && (activeNav === 'channels' || activeNav === 'overview' || activeNav === 'diagnostics' || activeNav === 'ai-config'))
+                'oc-main-scroll-page-fixed': fixedMainContentLayout
               }"
             >
-              <template v-if="isGateActive">
+              <template v-if="isGateActive || quickSetupForcedOpen">
                 <div
-                  v-if="gateState === 'NO_TARGET' || (gateState === 'NEED_INSTALL' && targetMode === 'ssh') || (gateState === 'NEED_CONFIG' && targetMode === 'ssh')"
+                  v-if="isGateActive && (gateState === 'NO_TARGET' || (gateState === 'NEED_INSTALL' && targetMode === 'ssh') || (gateState === 'NEED_CONFIG' && targetMode === 'ssh'))"
                   class="oc-panel p-6"
                 >
                 <h3 class="text-xl font-semibold" style="color: var(--oc-text-primary);">
@@ -1305,10 +1362,12 @@ onUnmounted(() => {
                 </div>
 
                 <QuickSetupGuide
-                  v-else-if="gateState === 'NEED_CONFIG' && targetMode === 'local' && envStatus"
+                  v-else-if="shouldShowQuickSetupGuide && envStatus"
                   class="h-full"
                   :show-toast="showToast"
+                  :show-close-action="shouldShowQuickSetupCloseAction"
                   :system-os="envStatus.system.os"
+                  @close="handleQuickSetupClose"
                   @complete="handleQuickSetupComplete"
                 />
 
@@ -1424,6 +1483,41 @@ onUnmounted(() => {
                   <p v-if="browserSettingError" class="mt-2 text-xs" style="color: var(--oc-danger);">
                     {{ browserSettingError }}
                   </p>
+                </section>
+
+                <section class="oc-panel p-6">
+                  <div class="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h4 class="text-lg font-semibold" style="color: var(--oc-text-primary);">页面调试</h4>
+                      <p class="mt-1 text-sm" style="color: var(--oc-text-muted);">
+                        从设置页直接打开快速引导，便于调试布局、主题色和页面内容。
+                      </p>
+                    </div>
+                    <span
+                      class="rounded-[10px] border px-2.5 py-1 text-xs"
+                      style="border-color: color-mix(in srgb, var(--oc-accent) 12%, var(--oc-card-border)); color: var(--oc-accent);"
+                    >
+                      调试入口
+                    </span>
+                  </div>
+
+                  <div
+                    class="mt-4 rounded-[12px] border p-4"
+                    style="border-color: color-mix(in srgb, var(--oc-accent) 10%, var(--oc-card-border)); background: color-mix(in srgb, var(--oc-accent-soft) 18%, var(--oc-card) 82%);"
+                  >
+                    <div class="flex flex-wrap items-center justify-between gap-4">
+                      <div>
+                        <p class="text-sm font-medium" style="color: var(--oc-text-primary);">打开快速引导页面</p>
+                        <p class="mt-1 text-xs leading-6" style="color: var(--oc-text-secondary);">
+                          使用当前本地环境数据渲染快速引导，用于检查满高布局与细节视觉效果。
+                        </p>
+                      </div>
+
+                      <Button variant="default" @click="openQuickSetupDebug">
+                        打开快速引导
+                      </Button>
+                    </div>
+                  </div>
                 </section>
 
                 <section v-if="showOpenClawUninstallAction" class="oc-panel p-6">

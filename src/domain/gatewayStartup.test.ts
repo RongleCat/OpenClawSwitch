@@ -1,5 +1,23 @@
 import { describe, expect, it } from 'vitest'
-import { waitForGatewayReady } from './gatewayStartup'
+import {
+  DEFAULT_GATEWAY_READY_OPTIONS,
+  GATEWAY_READY_INTERVAL_MS,
+  GATEWAY_READY_MAX_ATTEMPTS,
+  GATEWAY_READY_TIMEOUT_MS,
+  waitForGatewayReady,
+} from './gatewayStartup'
+
+describe('gateway startup defaults', () => {
+  it('uses a 3 minute readiness window', () => {
+    expect(GATEWAY_READY_TIMEOUT_MS).toBe(180000)
+    expect(GATEWAY_READY_INTERVAL_MS).toBe(1000)
+    expect(GATEWAY_READY_MAX_ATTEMPTS).toBe(180)
+    expect(DEFAULT_GATEWAY_READY_OPTIONS).toEqual({
+      maxAttempts: 180,
+      intervalMs: 1000,
+    })
+  })
+})
 
 describe('waitForGatewayReady', () => {
   it('returns true once health check succeeds', async () => {

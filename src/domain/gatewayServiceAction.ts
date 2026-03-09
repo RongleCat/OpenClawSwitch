@@ -2,6 +2,7 @@ export interface GatewayServiceActionInput {
   isWindows: boolean
   envMode: 'local' | 'ssh'
   gatewayServiceInstalled: boolean
+  gatewayReachable?: boolean
 }
 
 export interface GatewayQuickActionStateInput {
@@ -14,8 +15,9 @@ export const shouldShowInstallGatewayServiceAction = ({
   isWindows,
   envMode,
   gatewayServiceInstalled,
+  gatewayReachable = false,
 }: GatewayServiceActionInput) =>
-  isWindows && envMode === 'local' && !gatewayServiceInstalled
+  isWindows && envMode === 'local' && !gatewayServiceInstalled && !gatewayReachable
 
 export const resolveGatewayQuickActionGridColumns = (actionCount: number) =>
   Math.min(Math.max(actionCount, 1), 4)

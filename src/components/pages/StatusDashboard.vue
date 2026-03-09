@@ -98,6 +98,7 @@ const quickActions = computed(() => {
       isWindows: props.isWindows,
       envMode: props.envMode,
       gatewayServiceInstalled: props.gatewayServiceInstalled,
+      gatewayReachable: props.gatewayReachable,
     })
   ) {
     actions.push({

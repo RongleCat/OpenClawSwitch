@@ -11,7 +11,6 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "vendor:openclaw": "node ./scripts/prepare-openclaw-vendor.mjs",
     "vendor:windows-tools": "node ./scripts/prepare-windows-tools-vendor.mjs"
   },
   "dependencies": {

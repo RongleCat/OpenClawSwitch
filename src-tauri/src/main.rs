@@ -237,6 +237,46 @@ fn save_config_as(config: Value, new_path: String) -> Result<String, String> {
     Ok(new_path)
 }
 
+fn build_open_path_command_for_os(path: &std::path::Path, os: &str) -> Result<(String, Vec<String>), String> {
+    let path_str = path.to_string_lossy().to_string();
+    match os {
+        "macos" => Ok((
+            "open".to_string(),
+            vec!["-a".to_string(), "TextEdit".to_string(), path_str],
+        )),
+        "windows" => Ok(("notepad.exe".to_string(), vec![path_str])),
+        "linux" => Ok(("xdg-open".to_string(), vec![path_str])),
+        _ => Err("不支持的操作系统".to_string()),
+    }
+}
+
+#[tauri::command]
+fn open_path_in_default_app(path: String) -> Result<(), String> {
+    let file_path = PathBuf::from(&path);
+    if !file_path.exists() {
+        return Err(format!("路径不存在或无法访问({}): {}", if cfg!(target_os = "windows") { "windows" } else if cfg!(target_os = "macos") { "macos" } else { "linux" }, path));
+    }
+
+    let (program, args) = build_open_path_command_for_os(
+        &file_path,
+        if cfg!(target_os = "windows") {
+            "windows"
+        } else if cfg!(target_os = "macos") {
+            "macos"
+        } else {
+            "linux"
+        },
+    )?;
+
+    let mut command = Command::new(&program);
+    command.args(args);
+    command
+        .spawn()
+        .map_err(|error| format!("调用系统默认应用失败({}): {}", program, error))?;
+
+    Ok(())
+}
+
 // ============================================================================
 // 配置操作命令
 // ============================================================================
@@ -827,6 +867,7 @@ fn main() {
             load_config_from_file,
             save_config,
             save_config_as,
+            open_path_in_default_app,
             // 配置操作
             get_providers,
             get_model_selection,
@@ -879,6 +920,7 @@ fn main() {
             // 安装后配置
             installer::open_terminal_with_command,
             installer::generate_default_config,
+            installer::relaunch_as_admin,
             installer::install_gateway_service,
             installer::start_gateway,
             installer::stop_gateway,
@@ -895,4 +937,31 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn build_open_path_command_uses_textedit_on_macos() {
+        let (program, args) = build_open_path_command_for_os(Path::new("/tmp/openclaw.json"), "macos").unwrap();
+        assert_eq!(program, "open");
+        assert_eq!(args, vec!["-a", "TextEdit", "/tmp/openclaw.json"]);
+    }
+
+    #[test]
+    fn build_open_path_command_uses_notepad_on_windows() {
+        let (program, args) = build_open_path_command_for_os(Path::new(r"C:\temp\openclaw.json"), "windows").unwrap();
+        assert_eq!(program, "notepad.exe");
+        assert_eq!(args, vec![r"C:\temp\openclaw.json"]);
+    }
+
+    #[test]
+    fn build_open_path_command_uses_xdg_open_on_linux() {
+        let (program, args) = build_open_path_command_for_os(Path::new("/tmp/openclaw.json"), "linux").unwrap();
+        assert_eq!(program, "xdg-open");
+        assert_eq!(args, vec!["/tmp/openclaw.json"]);
+    }
 }

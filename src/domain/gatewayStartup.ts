@@ -1,5 +1,13 @@
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
+export const GATEWAY_READY_TIMEOUT_MS = 3 * 60 * 1000
+export const GATEWAY_READY_INTERVAL_MS = 1000
+export const GATEWAY_READY_MAX_ATTEMPTS = GATEWAY_READY_TIMEOUT_MS / GATEWAY_READY_INTERVAL_MS
+export const DEFAULT_GATEWAY_READY_OPTIONS = {
+  maxAttempts: GATEWAY_READY_MAX_ATTEMPTS,
+  intervalMs: GATEWAY_READY_INTERVAL_MS,
+} as const
+
 interface WaitForGatewayReadyOptions {
   maxAttempts?: number
   intervalMs?: number
@@ -11,8 +19,8 @@ export const waitForGatewayReady = async (
   options: WaitForGatewayReadyOptions = {}
 ) => {
   const {
-    maxAttempts = 30,
-    intervalMs = 2000,
+    maxAttempts = DEFAULT_GATEWAY_READY_OPTIONS.maxAttempts,
+    intervalMs = DEFAULT_GATEWAY_READY_OPTIONS.intervalMs,
     sleep = defaultSleep,
   } = options
 

@@ -26,6 +26,17 @@ describe('shouldShowInstallGatewayServiceAction', () => {
     ).toBe(false)
   })
 
+  it('hides action when gateway is already reachable', () => {
+    expect(
+      shouldShowInstallGatewayServiceAction({
+        isWindows: true,
+        envMode: 'local',
+        gatewayServiceInstalled: false,
+        gatewayReachable: true,
+      })
+    ).toBe(false)
+  })
+
   it('hides action in ssh mode', () => {
     expect(
       shouldShowInstallGatewayServiceAction({

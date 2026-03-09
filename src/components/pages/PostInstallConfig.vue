@@ -8,7 +8,7 @@ import {
   formatGatewayInstallError,
   isAdminRequiredGatewayInstallError,
 } from '../../domain/postInstallError'
-import { waitForGatewayReady } from '../../domain/gatewayStartup'
+import { DEFAULT_GATEWAY_READY_OPTIONS, waitForGatewayReady } from '../../domain/gatewayStartup'
 
 const emit = defineEmits<{
   complete: []
@@ -62,10 +62,7 @@ const startDefaultConfig = async () => {
     statusMessage.value = '正在等待网关就绪...'
     const ready = await waitForGatewayReady(
       async () => invoke<boolean>('health_check_gateway'),
-      {
-        maxAttempts: 20,
-        intervalMs: 1000,
-      }
+      DEFAULT_GATEWAY_READY_OPTIONS
     )
     if (!ready) {
       throw new Error('网关服务已安装，但在预期时间内未完成启动')

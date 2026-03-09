@@ -1,4 +1,6 @@
-﻿export type QuickSetupStepId = 'model' | 'channel' | 'gateway'
+import type { ModelConfig, OpenClawConfig, ProviderConfig } from '../types/config'
+
+export type QuickSetupStepId = 'model' | 'channel' | 'gateway'
 export type QuickSetupChannelId = 'feishu' | 'dingtalk' | 'telegram' | 'discord' | 'slack'
 export type QuickSetupProviderId =
   | 'dashscope-coding'
@@ -20,6 +22,7 @@ export interface QuickSetupProviderPreset {
   description: string
   baseUrl: string
   suggestedModels: Array<{ id: string; name: string }>
+  providerModels: ModelConfig[]
 }
 
 export interface QuickSetupChannelPreset {
@@ -36,55 +39,239 @@ export interface GatewayInstallPlan {
   commands: string[]
 }
 
+export interface QuickSetupGatewayOptions {
+  browserDefaultProfileEnabled: boolean
+  toolsFullProfileEnabled: boolean
+}
+
+export const QUICK_SETUP_PRIMARY_PROVIDER_IDS: QuickSetupProviderId[] = [
+  'dashscope-coding',
+  'tencent-coding',
+  'deepseek',
+]
+
+const BAILIAN_MODELS: ModelConfig[] = [
+  {
+    id: 'qwen3.5-plus',
+    name: 'qwen3.5-plus',
+    reasoning: false,
+    input: ['text', 'image'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 1_000_000,
+    maxTokens: 65_536,
+  },
+  {
+    id: 'qwen3-max-2026-01-23',
+    name: 'qwen3-max-2026-01-23',
+    reasoning: false,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 262_144,
+    maxTokens: 65_536,
+  },
+  {
+    id: 'qwen3-coder-next',
+    name: 'qwen3-coder-next',
+    reasoning: false,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 262_144,
+    maxTokens: 65_536,
+  },
+  {
+    id: 'qwen3-coder-plus',
+    name: 'qwen3-coder-plus',
+    reasoning: false,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 1_000_000,
+    maxTokens: 65_536,
+  },
+  {
+    id: 'MiniMax-M2.5',
+    name: 'MiniMax-M2.5',
+    reasoning: false,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 204_800,
+    maxTokens: 131_072,
+  },
+  {
+    id: 'glm-5',
+    name: 'glm-5',
+    reasoning: false,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 202_752,
+    maxTokens: 16_384,
+  },
+  {
+    id: 'glm-4.7',
+    name: 'glm-4.7',
+    reasoning: false,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 202_752,
+    maxTokens: 16_384,
+  },
+  {
+    id: 'kimi-k2.5',
+    name: 'kimi-k2.5',
+    reasoning: false,
+    input: ['text', 'image'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 262_144,
+    maxTokens: 32_768,
+  },
+]
+
+const LKEAP_MODELS: ModelConfig[] = [
+  {
+    id: 'hunyuan-2.0-instruct',
+    name: 'Tencent HY 2.0 Instruct',
+    reasoning: false,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 256_000,
+    maxTokens: 16_384,
+  },
+  {
+    id: 'hunyuan-2.0-thinking',
+    name: 'Tencent HY 2.0 Think',
+    reasoning: true,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 256_000,
+    maxTokens: 16_384,
+  },
+  {
+    id: 'hunyuan-t1',
+    name: 'Hunyuan-T1',
+    reasoning: true,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 256_000,
+    maxTokens: 16_384,
+  },
+  {
+    id: 'hunyuan-turbos',
+    name: 'Hunyuan-TurboS',
+    reasoning: false,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 256_000,
+    maxTokens: 16_384,
+  },
+  {
+    id: 'minimax-m2.5',
+    name: 'MiniMax-M2.5',
+    reasoning: false,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 204_800,
+    maxTokens: 131_072,
+  },
+  {
+    id: 'kimi-k2.5',
+    name: 'Kimi-K2.5',
+    reasoning: false,
+    input: ['text', 'image'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 262_144,
+    maxTokens: 32_768,
+  },
+  {
+    id: 'glm-5',
+    name: 'glm-5',
+    reasoning: false,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 202_752,
+    maxTokens: 8_192,
+  },
+]
+
+const cloneConfig = (config: OpenClawConfig): OpenClawConfig =>
+  JSON.parse(JSON.stringify(config ?? {})) as OpenClawConfig
+
+const buildProviderConfig = (preset: QuickSetupProviderPreset, apiKey: string, selectedModelId: string): ProviderConfig => {
+  const providerModels = preset.providerModels.map(model => ({ ...model }))
+
+  if (!providerModels.some(model => model.id === selectedModelId)) {
+    providerModels.push({
+      id: selectedModelId,
+      name: selectedModelId,
+    })
+  }
+
+  return {
+    baseUrl: preset.baseUrl,
+    apiKey,
+    api: 'openai-completions',
+    models: providerModels,
+  }
+}
+
 export const QUICK_SETUP_STEPS: QuickSetupStepMeta[] = [
   {
     id: 'model',
     title: '配置大模型',
-    subtitle: '从预设服务商快速写入统一模型配置，并选择主模型。',
+    subtitle: '选择服务商、填写 Key、确认主模型。',
   },
   {
     id: 'channel',
     title: '配置通信渠道',
-    subtitle: '用最精简的字段完成渠道接入，其他参数沿用默认值。',
+    subtitle: '快速接入一个消息渠道。',
   },
   {
     id: 'gateway',
     title: '安装并启动网关',
-    subtitle: '按当前系统执行网关安装与启动，并等待健康检查通过。',
+    subtitle: '按当前系统完成安装并等待网关就绪。',
   },
 ]
 
 export const QUICK_SETUP_PROVIDER_PRESETS: QuickSetupProviderPreset[] = [
   {
     id: 'dashscope-coding',
-    name: 'dashscope-coding',
-    displayName: '阿里云 Coding Plan',
-    description: '阿里云百炼 Coding 专线，适合代码生成与工程场景。',
+    name: 'bailian',
+    displayName: '阿里云 Coding',
+    description: '阿里云 Coding 兼容 OpenAI Completions。',
     baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
     suggestedModels: [
-      { id: 'qwen3-coder-plus', name: 'Qwen3 Coder Plus' },
-      { id: 'qwen3-max-2026-01-23', name: 'Qwen3 Max' },
+      { id: 'qwen3.5-plus', name: 'qwen3.5-plus' },
+      { id: 'qwen3-coder-plus', name: 'qwen3-coder-plus' },
+      { id: 'qwen3-max-2026-01-23', name: 'qwen3-max-2026-01-23' },
     ],
+    providerModels: BAILIAN_MODELS,
   },
   {
     id: 'tencent-coding',
-    name: 'tencent-coding',
-    displayName: '腾讯云 Coding Plan',
-    description: '腾讯云 LKEAP Coding 专线，兼容主流代码模型供应商。',
+    name: 'lkeap',
+    displayName: '腾讯云 Coding',
+    description: '腾讯云 Coding 兼容 OpenAI Completions。',
     baseUrl: 'https://api.lkeap.cloud.tencent.com/coding/v3',
     suggestedModels: [
+      { id: 'hunyuan-2.0-instruct', name: 'Tencent HY 2.0 Instruct' },
+      { id: 'hunyuan-2.0-thinking', name: 'Tencent HY 2.0 Think' },
+      { id: 'hunyuan-t1', name: 'Hunyuan-T1' },
+      { id: 'hunyuan-turbos', name: 'Hunyuan-TurboS' },
+      { id: 'minimax-m2.5', name: 'MiniMax-M2.5' },
+      { id: 'kimi-k2.5', name: 'Kimi-K2.5' },
       { id: 'glm-5', name: 'GLM-5' },
-      { id: 'kimi-k2.5', name: 'Kimi K2.5' },
-      { id: 'minimax-m2.5', name: 'MiniMax M2.5' },
     ],
+    providerModels: LKEAP_MODELS,
   },
   {
     id: 'deepseek',
     name: 'deepseek',
     displayName: 'DeepSeek',
-    description: 'DeepSeek 官方兼容接口，适合通用对话与推理。',
+    description: 'DeepSeek 官方兼容接口。',
     baseUrl: 'https://api.deepseek.com/v1',
     suggestedModels: [
+      { id: 'deepseek-chat', name: 'DeepSeek Chat' },
+      { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner' },
+    ],
+    providerModels: [
       { id: 'deepseek-chat', name: 'DeepSeek Chat' },
       { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner' },
     ],
@@ -93,9 +280,13 @@ export const QUICK_SETUP_PROVIDER_PRESETS: QuickSetupProviderPreset[] = [
     id: 'dashscope',
     name: 'dashscope',
     displayName: '阿里云 DashScope',
-    description: '阿里云通用兼容模式接口，适合常规模型接入。',
+    description: '阿里云通用兼容模式。',
     baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     suggestedModels: [
+      { id: 'qwen-plus', name: 'Qwen Plus' },
+      { id: 'qwen-max', name: 'Qwen Max' },
+    ],
+    providerModels: [
       { id: 'qwen-plus', name: 'Qwen Plus' },
       { id: 'qwen-max', name: 'Qwen Max' },
     ],
@@ -104,9 +295,13 @@ export const QUICK_SETUP_PROVIDER_PRESETS: QuickSetupProviderPreset[] = [
     id: 'hunyuan',
     name: 'hunyuan',
     displayName: '腾讯云混元',
-    description: '腾讯云混元官方兼容接口，适合通用模型调用。',
+    description: '腾讯云混元官方兼容接口。',
     baseUrl: 'https://api.hunyuan.cloud.tencent.com/v1',
     suggestedModels: [
+      { id: 'hunyuan-turbos-latest', name: 'Hunyuan Turbo S' },
+      { id: 'hunyuan-t1-latest', name: 'Hunyuan T1' },
+    ],
+    providerModels: [
       { id: 'hunyuan-turbos-latest', name: 'Hunyuan Turbo S' },
       { id: 'hunyuan-t1-latest', name: 'Hunyuan T1' },
     ],
@@ -117,39 +312,41 @@ export const QUICK_SETUP_CHANNEL_PRESETS: QuickSetupChannelPreset[] = [
   {
     id: 'feishu',
     name: '飞书',
-    description: '安装扩展后仅需填写 App ID 与 App Secret。',
+    description: '填写 App ID 和 App Secret。',
     placeholderLabel: 'App ID',
     secretLabel: 'App Secret',
   },
   {
     id: 'dingtalk',
     name: '钉钉',
-    description: '安装扩展后仅需填写 Client ID 与 Client Secret。',
+    description: '填写 Client ID 和 Client Secret。',
     placeholderLabel: 'Client ID',
     secretLabel: 'Client Secret',
   },
   {
     id: 'telegram',
     name: 'Telegram',
-    description: '只需填写 Bot Token，保存后默认启用。',
+    description: '填写 Bot Token。',
     placeholderLabel: 'Bot Name（可选）',
     secretLabel: 'Bot Token',
   },
   {
     id: 'discord',
     name: 'Discord',
-    description: '只需填写 Bot Token，保存后默认启用。',
+    description: '填写 Bot Token。',
     placeholderLabel: 'Bot Name（可选）',
     secretLabel: 'Bot Token',
   },
   {
     id: 'slack',
     name: 'Slack',
-    description: '快速模式下只需填写 Bot Token，保存后默认启用。',
-    placeholderLabel: 'Workspace Alias（可选）',
+    description: '填写 Signing Secret 和 Bot Token。',
+    placeholderLabel: 'Signing Secret',
     secretLabel: 'Bot Token',
   },
 ]
+
+export const QUICK_SETUP_MANAGED_CHANNEL_IDS: QuickSetupChannelId[] = ['feishu', 'dingtalk', 'telegram', 'discord', 'slack']
 
 export const canSkipQuickSetupStep = (stepId: QuickSetupStepId) =>
   stepId === 'model' || stepId === 'channel'
@@ -159,6 +356,168 @@ export const findProviderPreset = (presetId: string) =>
 
 export const findChannelPreset = (channelId: string) =>
   QUICK_SETUP_CHANNEL_PRESETS.find((channel) => channel.id === channelId)
+
+export const applyQuickSetupModelPreset = (
+  config: OpenClawConfig,
+  preset: QuickSetupProviderPreset,
+  apiKey: string,
+  selectedModelId: string
+): OpenClawConfig => {
+  const next = cloneConfig(config)
+
+  next.models ??= {}
+  next.models.mode = 'merge'
+  next.models.providers ??= {}
+  next.models.providers[preset.name] = buildProviderConfig(preset, apiKey, selectedModelId)
+
+  next.agents ??= {}
+  next.agents.defaults ??= {}
+  next.agents.defaults.model ??= { primary: '' }
+  next.agents.defaults.model.primary = `${preset.name}/${selectedModelId}`
+
+  const allowedModels = { ...(next.agents.defaults.models ?? {}) }
+  for (const modelRef of Object.keys(allowedModels)) {
+    if (modelRef.startsWith(`${preset.name}/`)) {
+      delete allowedModels[modelRef]
+    }
+  }
+
+  for (const model of next.models.providers[preset.name]?.models ?? []) {
+    allowedModels[`${preset.name}/${model.id}`] = {}
+  }
+  allowedModels[`${preset.name}/${selectedModelId}`] = {}
+  next.agents.defaults.models = allowedModels
+
+  return next
+}
+
+export const clearQuickSetupManagedChannels = (config: OpenClawConfig): OpenClawConfig => {
+  const next = cloneConfig(config)
+  const channels = next.channels
+
+  if (!channels || typeof channels !== 'object' || Array.isArray(channels)) {
+    return next
+  }
+
+  const channelRecord = channels as Record<string, unknown>
+  for (const channelId of QUICK_SETUP_MANAGED_CHANNEL_IDS) {
+    delete channelRecord[channelId]
+  }
+  delete channelRecord['dingtalk-connector']
+
+  if (Object.keys(channelRecord).length === 0) {
+    delete next.channels
+  }
+
+  return next
+}
+
+const hasNonEmptyString = (value: unknown) => typeof value === 'string' && value.trim().length > 0
+
+export const sanitizeQuickSetupChannelConfig = (config: OpenClawConfig): OpenClawConfig => {
+  const next = cloneConfig(config)
+  const channels = next.channels
+
+  if (!channels || typeof channels !== 'object' || Array.isArray(channels)) {
+    return next
+  }
+
+  const channelRecord = channels as Record<string, unknown>
+  const telegram = channelRecord.telegram
+  if (telegram && typeof telegram === 'object' && !Array.isArray(telegram)) {
+    const node = telegram as Record<string, unknown>
+    if (!hasNonEmptyString(node.botToken)) {
+      delete channelRecord.telegram
+    }
+  }
+
+  const discord = channelRecord.discord
+  if (discord && typeof discord === 'object' && !Array.isArray(discord)) {
+    const node = discord as Record<string, unknown>
+    if (!hasNonEmptyString(node.token) && !hasNonEmptyString(node.botToken)) {
+      delete channelRecord.discord
+    }
+  }
+
+  const slack = channelRecord.slack
+  if (slack && typeof slack === 'object' && !Array.isArray(slack)) {
+    const node = slack as Record<string, unknown>
+    if (!hasNonEmptyString(node.signingSecret) || !hasNonEmptyString(node.botToken)) {
+      delete channelRecord.slack
+    }
+  }
+
+  const feishu = channelRecord.feishu
+  if (feishu && typeof feishu === 'object' && !Array.isArray(feishu)) {
+    const node = feishu as Record<string, unknown>
+    if (!hasNonEmptyString(node.appId) || !hasNonEmptyString(node.appSecret)) {
+      delete channelRecord.feishu
+    }
+  }
+
+  const dingtalk = channelRecord.dingtalk
+  if (dingtalk && typeof dingtalk === 'object' && !Array.isArray(dingtalk)) {
+    const node = dingtalk as Record<string, unknown>
+    if (!hasNonEmptyString(node.clientId) || !hasNonEmptyString(node.clientSecret)) {
+      delete channelRecord.dingtalk
+    }
+  }
+
+  const dingtalkConnector = channelRecord['dingtalk-connector']
+  if (dingtalkConnector && typeof dingtalkConnector === 'object' && !Array.isArray(dingtalkConnector)) {
+    const node = dingtalkConnector as Record<string, unknown>
+    if (!hasNonEmptyString(node.clientId) || !hasNonEmptyString(node.clientSecret)) {
+      delete channelRecord['dingtalk-connector']
+    }
+  }
+
+  if (Object.keys(channelRecord).length === 0) {
+    delete next.channels
+  }
+
+  return next
+}
+
+export const applyQuickSetupGatewayOptions = (
+  config: OpenClawConfig,
+  options: QuickSetupGatewayOptions
+): OpenClawConfig => {
+  const next = cloneConfig(config)
+
+  const browserConfig = next.browser && typeof next.browser === 'object' && !Array.isArray(next.browser)
+    ? { ...(next.browser as Record<string, unknown>) }
+    : {}
+
+  if (options.browserDefaultProfileEnabled) {
+    browserConfig.defaultProfile = 'openclaw'
+  } else {
+    delete browserConfig.defaultProfile
+  }
+
+  if (Object.keys(browserConfig).length > 0) {
+    next.browser = browserConfig
+  } else {
+    delete next.browser
+  }
+
+  const toolsConfig = next.tools && typeof next.tools === 'object' && !Array.isArray(next.tools)
+    ? { ...(next.tools as Record<string, unknown>) }
+    : {}
+
+  if (options.toolsFullProfileEnabled) {
+    toolsConfig.profile = 'full'
+  } else {
+    delete toolsConfig.profile
+  }
+
+  if (Object.keys(toolsConfig).length > 0) {
+    next.tools = toolsConfig
+  } else {
+    delete next.tools
+  }
+
+  return next
+}
 
 export const getGatewayInstallPlan = (os: 'windows' | 'macos' | 'linux'): GatewayInstallPlan => {
   if (os === 'windows') {

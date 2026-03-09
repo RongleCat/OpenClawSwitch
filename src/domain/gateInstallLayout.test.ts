@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { resolveGateTopbarTitle, shouldUseFixedGateInstallLayout } from './gateInstallLayout'
+import {
+  resolveGateTopbarTitle,
+  shouldRenderQuickSetupCloseAction,
+  shouldRenderQuickSetupGuide,
+  shouldRenderSidebar,
+  shouldUseFixedGateInstallLayout,
+  shouldUseFixedMainContentLayout,
+} from './gateInstallLayout'
 
 describe('resolveGateTopbarTitle', () => {
   it('returns merged install title in local install step', () => {
@@ -14,10 +21,49 @@ describe('resolveGateTopbarTitle', () => {
 })
 
 describe('shouldUseFixedGateInstallLayout', () => {
-  it('uses fixed layout only in local install step', () => {
+  it('uses fixed layout for local install and quick setup steps', () => {
     expect(shouldUseFixedGateInstallLayout('NEED_INSTALL', 'local')).toBe(true)
+    expect(shouldUseFixedGateInstallLayout('NEED_CONFIG', 'local')).toBe(true)
     expect(shouldUseFixedGateInstallLayout('NEED_INSTALL', 'ssh')).toBe(false)
     expect(shouldUseFixedGateInstallLayout('NO_TARGET', 'local')).toBe(false)
-    expect(shouldUseFixedGateInstallLayout('NEED_CONFIG', 'local')).toBe(false)
+    expect(shouldUseFixedGateInstallLayout('NEED_CONFIG', 'ssh')).toBe(false)
+  })
+})
+
+describe('shouldUseFixedMainContentLayout', () => {
+  it('keeps quick setup debug view in fixed-height layout', () => {
+    expect(shouldUseFixedMainContentLayout(true, 'NEED_CONFIG', 'local', 'overview', false)).toBe(true)
+    expect(shouldUseFixedMainContentLayout(false, null, null, 'settings', true)).toBe(true)
+    expect(shouldUseFixedMainContentLayout(false, null, null, 'settings', false)).toBe(false)
+  })
+})
+
+describe('shouldRenderQuickSetupGuide', () => {
+  it('supports gate flow and manual debug entry', () => {
+    expect(shouldRenderQuickSetupGuide(true, 'NEED_CONFIG', 'local', false, true)).toBe(true)
+    expect(shouldRenderQuickSetupGuide(false, null, null, true, true)).toBe(true)
+    expect(shouldRenderQuickSetupGuide(false, null, null, true, false)).toBe(false)
+    expect(shouldRenderQuickSetupGuide(true, 'NEED_CONFIG', 'ssh', false, true)).toBe(false)
+  })
+
+  it('allows forcing quick setup open after admin relaunch resume', () => {
+    expect(shouldRenderQuickSetupGuide(false, null, 'local', true, true)).toBe(true)
+    expect(shouldRenderQuickSetupGuide(false, 'NO_TARGET', 'local', true, true)).toBe(true)
+  })
+})
+
+describe('shouldRenderSidebar', () => {
+  it('hides the app sidebar while quick setup resume is forced open', () => {
+    expect(shouldRenderSidebar(false, false)).toBe(true)
+    expect(shouldRenderSidebar(true, false)).toBe(false)
+    expect(shouldRenderSidebar(false, true)).toBe(false)
+  })
+})
+
+describe('shouldRenderQuickSetupCloseAction', () => {
+  it('shows close only for manual settings-entry quick setup', () => {
+    expect(shouldRenderQuickSetupCloseAction(false, true)).toBe(true)
+    expect(shouldRenderQuickSetupCloseAction(true, true)).toBe(false)
+    expect(shouldRenderQuickSetupCloseAction(false, false)).toBe(false)
   })
 })

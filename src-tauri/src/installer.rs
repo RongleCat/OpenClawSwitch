@@ -4,8 +4,9 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::thread;
+use std::time::Duration;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use tauri::{AppHandle, Manager};
@@ -457,6 +458,27 @@ fn find_openclaw_root_in_ancestors(path: &Path) -> Option<PathBuf> {
     None
 }
 
+fn prefer_windows_command_wrapper(candidate: &Path) -> PathBuf {
+    let extension = candidate
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if matches!(extension.as_str(), "cmd" | "exe" | "bat") {
+        return candidate.to_path_buf();
+    }
+
+    for preferred_extension in ["cmd", "exe", "bat"] {
+        let preferred = candidate.with_extension(preferred_extension);
+        if preferred.exists() {
+            return preferred;
+        }
+    }
+
+    candidate.to_path_buf()
+}
+
 fn detect_openclaw_bin_path() -> Option<PathBuf> {
     let locate_cmd = if cfg!(target_os = "windows") {
         "where openclaw"
@@ -469,10 +491,170 @@ fn detect_openclaw_bin_path() -> Option<PathBuf> {
             continue;
         };
         if candidate.exists() {
+            if cfg!(target_os = "windows") {
+                return Some(prefer_windows_command_wrapper(&candidate));
+            }
             return Some(candidate);
         }
     }
     None
+}
+
+#[cfg(test)]
+mod installer_tests {
+    use super::{
+        append_windows_user_path_entry,
+        build_default_openclaw_config,
+        build_windows_elevated_powershell_command,
+        build_windows_gateway_service_install_script,
+        build_windows_nssm_service_install_args,
+        build_windows_relaunch_as_admin_command,
+        prefer_windows_command_wrapper,
+    };
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn make_temp_dir(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("openclawswitch-{name}-{unique}"));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn prefer_windows_command_wrapper_uses_cmd_for_extensionless_entry() {
+        let dir = make_temp_dir("cmd-wrapper");
+        let extensionless = dir.join("openclaw");
+        let cmd_wrapper = dir.join("openclaw.cmd");
+        std::fs::write(&extensionless, "shim").expect("write extensionless shim");
+        std::fs::write(&cmd_wrapper, "@echo off").expect("write cmd shim");
+
+        let selected = prefer_windows_command_wrapper(&extensionless);
+        assert_eq!(selected, cmd_wrapper);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prefer_windows_command_wrapper_rewrites_ps1_to_cmd_when_available() {
+        let dir = make_temp_dir("ps1-wrapper");
+        let powershell_wrapper = dir.join("openclaw.ps1");
+        let cmd_wrapper = dir.join("openclaw.cmd");
+        std::fs::write(&powershell_wrapper, "Write-Host test").expect("write powershell shim");
+        std::fs::write(&cmd_wrapper, "@echo off").expect("write cmd shim");
+
+        let selected = prefer_windows_command_wrapper(&powershell_wrapper);
+        assert_eq!(selected, cmd_wrapper);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn nssm_command_keeps_executable_and_script_paths_as_single_args() {
+        let service_name = "OpenClaw Gateway";
+        let cmd_exe = r"C:\Windows\System32\cmd.exe";
+        let script_path = PathBuf::from(r"C:\Program Files\OpenClaw Switch\gateway-service.cmd");
+
+        let args = build_windows_nssm_service_install_args(service_name, cmd_exe, &script_path);
+
+        assert_eq!(args[0], "install");
+        assert_eq!(args[1], service_name);
+        assert_eq!(args[2], cmd_exe);
+        assert_eq!(args[3], "/d");
+        assert_eq!(args[4], "/s");
+        assert_eq!(args[5], "/c");
+        assert_eq!(args[6], format!("\"{}\"", script_path.display()));
+    }
+
+    #[test]
+    fn decode_command_output_reads_utf16le_console_output() {
+        let bytes = "Administrator access is needed to install a service."
+            .encode_utf16()
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect::<Vec<_>>();
+
+        assert_eq!(super::decode_command_output(&bytes), "Administrator access is needed to install a service.");
+    }
+
+    #[test]
+    fn elevated_powershell_command_uses_runas_and_file_script() {
+        let script_path = PathBuf::from(r"C:\Users\Ronglecat\AppData\Local\Temp\install-gateway-service.ps1");
+        let args = build_windows_elevated_powershell_command(&script_path);
+
+        assert!(args.iter().any(|arg| arg.contains("-Verb RunAs")));
+        assert!(args.iter().any(|arg| arg.contains("install-gateway-service.ps1")));
+    }
+
+    #[test]
+    fn elevated_gateway_script_contains_result_file_and_nssm_commands() {
+        let script = build_windows_gateway_service_install_script(
+            Path::new(r"C:\tools\nssm.exe"),
+            "OpenClaw Gateway",
+            r"C:\Windows\System32\cmd.exe",
+            Path::new(r"C:\Users\Ronglecat\.openclaw\service\gateway-service.cmd"),
+            Path::new(r"C:\Users\Ronglecat"),
+            Path::new(r"C:\Users\Ronglecat\.openclaw\logs\gateway-service.stdout.log"),
+            Path::new(r"C:\Users\Ronglecat\.openclaw\logs\gateway-service.stderr.log"),
+            Path::new(r"C:\Users\Ronglecat\.openclaw\service\install-gateway-service.result.txt"),
+        );
+
+        assert!(script.contains("Set-Content -Path $resultPath -Value 'ok'"));
+        assert!(script.contains("'install', 'OpenClaw Gateway'"));
+        assert!(script.contains("'start', 'OpenClaw Gateway'"));
+    }
+
+    #[test]
+    fn relaunch_as_admin_command_uses_current_exe_and_runas() {
+        let exe_path = Path::new(r"C:\Program Files\OpenClaw Switch\openclawswitch.exe");
+        let args = build_windows_relaunch_as_admin_command(exe_path);
+
+        assert_eq!(args[0], "-NoProfile");
+        assert_eq!(args[1], "-ExecutionPolicy");
+        assert_eq!(args[2], "Bypass");
+        assert_eq!(args[3], "-Command");
+        assert!(args[4].contains("Start-Process"));
+        assert!(args[4].contains("-Verb RunAs"));
+        assert!(args[4].contains("openclawswitch.exe"));
+    }
+
+    #[test]
+    fn default_config_keeps_channels_empty_until_user_selects_one() {
+        let config = build_default_openclaw_config("openclaw-test-token");
+
+        assert!(config.get("channels").is_none());
+        assert_eq!(config["gateway"]["auth"]["token"], "openclaw-test-token");
+        assert_eq!(config["models"]["mode"], "merge");
+    }
+
+    #[test]
+    fn append_windows_user_path_entry_ignores_case_whitespace_and_trailing_slash() {
+        let target = Path::new(r"C:\Users\Ronglecat\.openclaw\npm-global");
+        let current = format!(
+            " C:\\tools ; {}\\ ; C:\\Windows\\System32 ",
+            target.display()
+        );
+
+        let updated = append_windows_user_path_entry(&current, target);
+
+        assert!(updated.is_none());
+    }
+
+    #[test]
+    fn append_windows_user_path_entry_appends_missing_entry_once() {
+        let target = Path::new(r"C:\Users\Ronglecat\.openclaw\npm-global");
+        let current = r"C:\tools;C:\Windows\System32";
+
+        let updated = append_windows_user_path_entry(current, target)
+            .expect("missing entry should be appended");
+
+        assert_eq!(
+            updated,
+            format!(r"C:\tools;C:\Windows\System32;{}", target.display())
+        );
+    }
 }
 
 fn detect_openclaw_root_from_bin_path() -> Option<PathBuf> {
@@ -911,6 +1093,24 @@ fn run_shell(cmd: &str) -> Result<String, String> {
     }
 }
 
+fn format_command_failure(status_code: Option<i32>, stdout: &str, stderr: &str) -> String {
+    let stderr = stderr.trim();
+    let stdout = stdout.trim();
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        ""
+    };
+
+    if detail.is_empty() {
+        format!("命令执行失败，退出码: {:?}", status_code)
+    } else {
+        format!("命令执行失败，退出码: {:?}\n{}", status_code, detail)
+    }
+}
+
 fn run_shell_with_log(app: &AppHandle, step: &str, cmd: &str) -> Result<String, String> {
     emit_log(app, step, &format!("$ {}", cmd), "info");
 
@@ -931,11 +1131,16 @@ fn run_shell_with_log(app: &AppHandle, step: &str, cmd: &str) -> Result<String, 
 
     let stderr_app = app.clone();
     let stderr_step = step.to_string();
+    let stderr_lines = Arc::new(Mutex::new(Vec::new()));
+    let stderr_lines_handle = Arc::clone(&stderr_lines);
     let stderr_handle = stderr.map(|err| {
         thread::spawn(move || {
             let reader = BufReader::new(err);
             for line in reader.lines().flatten() {
                 emit_log(&stderr_app, &stderr_step, &line, "warn");
+                if let Ok(mut collected) = stderr_lines_handle.lock() {
+                    collected.push(line);
+                }
             }
         })
     });
@@ -951,6 +1156,16 @@ fn run_shell_with_log(app: &AppHandle, step: &str, cmd: &str) -> Result<String, 
 
     if let Some(handle) = stderr_handle {
         let _ = handle.join();
+    }
+
+    let stderr_output = stderr_lines
+        .lock()
+        .map(|collected| collected.join("\n"))
+        .unwrap_or_default();
+
+    let status = child.wait().map_err(|e| format!("等待命令完成失败: {}", e))?;
+    if !status.success() {
+        return Err(format_command_failure(status.code(), &output_lines.join("\n"), &stderr_output));
     }
 
     let status = child.wait().map_err(|e| format!("等待命令完成失败: {}", e))?;
@@ -1020,6 +1235,29 @@ fn shell_quote(value: &str) -> String {
     } else {
         format!("'{}'", value.replace('\'', "'\"'\"'"))
     }
+}
+
+fn decode_command_output(bytes: &[u8]) -> String {
+    let decoded = if bytes.len() >= 2 && bytes.len() % 2 == 0 {
+        let odd_nulls = bytes.iter().skip(1).step_by(2).filter(|byte| **byte == 0).count();
+        if odd_nulls * 2 >= bytes.len() / 2 {
+            let utf16 = bytes
+                .chunks_exact(2)
+                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                .collect::<Vec<_>>();
+            String::from_utf16_lossy(&utf16)
+        } else {
+            String::from_utf8_lossy(bytes).to_string()
+        }
+    } else {
+        String::from_utf8_lossy(bytes).to_string()
+    };
+    decoded.trim().to_string()
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_single_quote(value: &str) -> String {
+    value.replace('\'', "''")
 }
 
 fn with_fnm_env(cmd: &str) -> String {
@@ -1703,13 +1941,83 @@ fn ensure_windows_process_path(dir: &Path) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
+fn sanitize_windows_path_entry(value: &str) -> String {
+    let mut sanitized = value.trim().trim_matches('"').replace('/', "\\");
+    while sanitized.len() > 3 && sanitized.ends_with('\\') {
+        sanitized.pop();
+    }
+    sanitized
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_windows_path_entry(value: &str) -> String {
+    sanitize_windows_path_entry(value).to_ascii_lowercase()
+}
+
+#[cfg(target_os = "windows")]
+fn append_windows_user_path_entry(current: &str, dir: &Path) -> Option<String> {
+    let target = sanitize_windows_path_entry(&dir.to_string_lossy());
+    if target.is_empty() {
+        return None;
+    }
+
+    let target_normalized = normalize_windows_path_entry(&target);
+    let mut segments = Vec::new();
+    let mut exists = false;
+
+    for segment in current.split(';') {
+        let sanitized = sanitize_windows_path_entry(segment);
+        if sanitized.is_empty() {
+            continue;
+        }
+        if normalize_windows_path_entry(&sanitized) == target_normalized {
+            exists = true;
+        }
+        segments.push(sanitized);
+    }
+
+    if exists {
+        None
+    } else {
+        segments.push(target);
+        Some(segments.join(";"))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn run_powershell_no_profile(script: &str) -> Result<String, String> {
+    let mut command = Command::new("powershell");
+    apply_no_window(&mut command);
+    command
+        .args(["-NoProfile", "-Command", script])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = command
+        .output()
+        .map_err(|error| format!("执行 PowerShell 失败: {}", error))?;
+    let stdout = decode_command_output(&output.stdout);
+    let stderr = decode_command_output(&output.stderr);
+
+    if output.status.success() {
+        Ok(stdout)
+    } else {
+        Err(format_command_failure(output.status.code(), &stdout, &stderr))
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn persist_windows_user_path_entry(dir: &Path) -> Result<(), String> {
-    let target = dir.to_string_lossy().replace("'", "''");
-    let cmd = format!(
-        r#"powershell -NoProfile -Command "$target='{}'; $current=[Environment]::GetEnvironmentVariable('Path','User'); $segments=@(); if (-not [string]::IsNullOrWhiteSpace($current)) {{ $segments=$current -split ';' | Where-Object {{ $_ -and $_.Trim() -ne '' }} }}; if ($segments -notcontains $target) {{ $updated = if ($segments.Count -gt 0) {{ ($segments + $target) -join ';' }} else {{ $target }}; [Environment]::SetEnvironmentVariable('Path', $updated, 'User') }}""#,
-        target
-    );
-    run_shell(&cmd).map(|_| ())
+    let current = run_powershell_no_profile("[Environment]::GetEnvironmentVariable('Path','User')")?;
+    let Some(updated) = append_windows_user_path_entry(&current, dir) else {
+        return Ok(());
+    };
+    let escaped = updated.replace('\'', "''");
+    run_powershell_no_profile(&format!(
+        "[Environment]::SetEnvironmentVariable('Path', '{}', 'User')",
+        escaped
+    ))
+    .map(|_| ())
 }
 
 #[cfg(target_os = "windows")]
@@ -1891,20 +2199,6 @@ fn extract_managed_node_archive(data: &[u8], version: &str) -> Result<PathBuf, S
     Ok(final_dir)
 }
 
-fn resolve_bundled_openclaw_tarball(app: &AppHandle) -> Option<PathBuf> {
-    for relative in ["vendor/openclaw/openclaw.tgz", "resources/vendor/openclaw/openclaw.tgz"] {
-        if let Some(path) = app.path_resolver().resolve_resource(relative) {
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-    [
-        PathBuf::from("src-tauri").join("resources").join("vendor").join("openclaw").join("openclaw.tgz"),
-        PathBuf::from("resources").join("vendor").join("openclaw").join("openclaw.tgz"),
-    ].into_iter().find(|path| path.exists())
-}
-
 fn verify_openclaw_available_now() -> Result<String, String> {
     run_shell(&with_fnm_env("openclaw --version")).or_else(|_| run_cmd("openclaw", &["--version"]))
 }
@@ -1918,6 +2212,7 @@ fn install_openclaw_with_source(app: &AppHandle, step: &str, source: &str, regis
     }
     run_shell_with_log(app, step, &cmd)?;
     expose_managed_runtime_to_user_path_silently()?;
+    repair_managed_node_path_silently();
     verify_openclaw_available_now()
 }
 
@@ -1950,21 +2245,6 @@ pub async fn install_openclaw(app: AppHandle, use_china_mirror: bool) -> Result<
     expose_managed_runtime_to_user_path_silently()?;
 
     let registries = if use_china_mirror { NPM_REGISTRIES.to_vec() } else { vec![NPM_REGISTRIES[2]] };
-
-    if let Some(tarball) = resolve_bundled_openclaw_tarball(&app) {
-        emit_log(&app, step, &format!("优先使用内置安装包: {}", tarball.display()), "info");
-        let tarball_arg = shell_quote(&tarball.to_string_lossy());
-        for registry in &registries {
-            match install_openclaw_with_source(&app, step, &tarball_arg, Some(registry)) {
-                Ok(version) => {
-                    emit_log(&app, step, &format!("OpenClaw 安装成功: {}", version), "success");
-                    return Ok("OpenClaw 安装成功".to_string());
-                }
-                Err(error) => emit_log(&app, step, &format!("内置包安装失败（{}）: {}", registry, error), "warn"),
-            }
-        }
-        emit_log(&app, step, "内置包安装失败，回退在线安装", "warn");
-    }
 
     for registry in &registries {
         emit_log(&app, step, &format!("使用 registry: {}", registry), "info");
@@ -2231,69 +2511,7 @@ pub async fn generate_default_config(app: AppHandle) -> Result<String, String> {
 
     // 默认配置（最精简可启动）
     // 参考官方配置文档：最小可用配置 + gateway.mode=local，确保 gateway 可启动
-    let default_config = serde_json::json!({
-        "gateway": {
-            "mode": "local",
-            "port": 18789,
-            "bind": "loopback",
-            "auth": {
-                "mode": "token",
-                "token": token
-            }
-        },
-        "models": {
-            "mode": "custom",
-            "providers": {}
-        },
-        "agents": {
-            "defaults": {
-                "workspace": "~/.openclaw/workspace",
-                "model": {
-                    "primary": "placeholder/complete-quick-setup"
-                }
-            }
-        },
-        "channels": {
-            "telegram": {
-                "enabled": false,
-                "dmPolicy": "pairing",
-                "groupPolicy": "allowlist",
-                "replyToMode": "off"
-            },
-            "discord": {
-                "enabled": false,
-                "dm": {
-                    "policy": "pairing"
-                },
-                "groupPolicy": "allowlist",
-                "replyToMode": "off"
-            },
-            "slack": {
-                "enabled": false,
-                "mode": "http",
-                "webhookPath": "/webhooks/slack",
-                "dmPolicy": "pairing",
-                "groupPolicy": "allowlist",
-                "replyToMode": "off",
-                "requireMention": true
-            },
-            "feishu": {
-                "enabled": false,
-                "connectionMode": "websocket",
-                "dmPolicy": "pairing",
-                "groupPolicy": "allowlist",
-                "renderMode": "auto"
-            },
-            "dingtalk": {
-                "enabled": false,
-                "dmPolicy": "open",
-                "groupPolicy": "open",
-                "messageType": "markdown",
-                "showThinking": true,
-                "enableMediaUpload": true
-            }
-        }
-    });
+    let default_config = build_default_openclaw_config(&token);
 
     // 写入配置文件
     let config_str = serde_json::to_string_pretty(&default_config)
@@ -2310,6 +2528,32 @@ pub async fn generate_default_config(app: AppHandle) -> Result<String, String> {
     );
 
     Ok(format!("配置文件已生成: {}", config_path.display()))
+}
+
+fn build_default_openclaw_config(token: &str) -> serde_json::Value {
+    serde_json::json!({
+        "gateway": {
+            "mode": "local",
+            "port": 18789,
+            "bind": "loopback",
+            "auth": {
+                "mode": "token",
+                "token": token
+            }
+        },
+        "models": {
+            "mode": "merge",
+            "providers": {}
+        },
+        "agents": {
+            "defaults": {
+                "workspace": "~/.openclaw/workspace",
+                "model": {
+                    "primary": "placeholder/complete-quick-setup"
+                }
+            }
+        }
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -2395,23 +2639,223 @@ fn write_windows_gateway_service_script(home_dir: &Path, openclaw_bin_path: &Pat
 }
 
 #[cfg(target_os = "windows")]
-fn run_nssm_command_with_log(app: &AppHandle, step: &str, nssm_path: &Path, args: &[&str]) -> Result<String, String> {
-    let mut command = shell_quote(&nssm_path.to_string_lossy());
+fn format_command_for_log(program: &Path, args: &[&str]) -> String {
+    let mut command = shell_quote(&program.to_string_lossy());
     for arg in args {
         command.push(' ');
         command.push_str(&shell_quote(arg));
     }
-    run_shell_with_log(app, step, &command)
+    command
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_command_direct(program: &Path, args: &[&str]) -> Result<String, String> {
+    let mut command = Command::new(program);
+    apply_no_window(&mut command);
+    command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let output = command.output().map_err(|error| format!("执行命令失败: {}", error))?;
+    let stdout = decode_command_output(&output.stdout);
+    let stderr = decode_command_output(&output.stderr);
+
+    if output.status.success() {
+        Ok(stdout)
+    } else {
+        Err(format_command_failure(output.status.code(), &stdout, &stderr))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn run_nssm_command_with_log(app: &AppHandle, step: &str, nssm_path: &Path, args: &[&str]) -> Result<String, String> {
+    emit_log(app, step, &format!("$ {}", format_command_for_log(nssm_path, args)), "info");
+    match run_windows_command_direct(nssm_path, args) {
+        Ok(stdout) => {
+            for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+                emit_log(app, step, line, "info");
+            }
+            Ok(stdout)
+        }
+        Err(error) => {
+            for line in error.lines().filter(|line| !line.trim().is_empty()) {
+                emit_log(app, step, line, "warn");
+            }
+            Err(error)
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
 fn run_nssm_command(nssm_path: &Path, args: &[&str]) -> Result<String, String> {
-    let mut command = shell_quote(&nssm_path.to_string_lossy());
-    for arg in args {
-        command.push(' ');
-        command.push_str(&shell_quote(arg));
+    run_windows_command_direct(nssm_path, args)
+}
+
+#[cfg(target_os = "windows")]
+fn build_windows_nssm_service_install_args(service_name: &str, cmd_exe: &str, script_path: &Path) -> Vec<String> {
+    vec![
+        "install".to_string(),
+        service_name.to_string(),
+        cmd_exe.to_string(),
+        "/d".to_string(),
+        "/s".to_string(),
+        "/c".to_string(),
+        format!("\"{}\"", script_path.display()),
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn build_windows_gateway_service_install_script(
+    nssm_path: &Path,
+    service_name: &str,
+    cmd_exe: &str,
+    script_path: &Path,
+    home_dir: &Path,
+    stdout_log: &Path,
+    stderr_log: &Path,
+    result_path: &Path,
+) -> String {
+    let install_args = build_windows_nssm_service_install_args(service_name, cmd_exe, script_path);
+    let install_args_ps = install_args
+        .iter()
+        .map(|arg| format!("'{}'", powershell_single_quote(arg)))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!(
+        concat!(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$nssm = '{}'\n",
+            "$resultPath = '{}'\n",
+            "function Invoke-Nssm {{\n",
+            "  param([string[]]$Args, [switch]$IgnoreErrors)\n",
+            "  & $nssm @Args\n",
+            "  if ($LASTEXITCODE -ne 0 -and -not $IgnoreErrors) {{\n",
+            "    throw \"nssm failed ($LASTEXITCODE): $($Args -join ' ')\"\n",
+            "  }}\n",
+            "}}\n",
+            "try {{\n",
+            "  Remove-Item -Path $resultPath -Force -ErrorAction SilentlyContinue\n",
+            "  Invoke-Nssm -Args @('stop', '{}') -IgnoreErrors\n",
+            "  Invoke-Nssm -Args @('remove', '{}', 'confirm') -IgnoreErrors\n",
+            "  Invoke-Nssm -Args @({})\n",
+            "  Invoke-Nssm -Args @('set', '{}', 'AppDirectory', '{}')\n",
+            "  Invoke-Nssm -Args @('set', '{}', 'Description', 'OpenClaw Gateway')\n",
+            "  Invoke-Nssm -Args @('set', '{}', 'Start', 'SERVICE_AUTO_START')\n",
+            "  Invoke-Nssm -Args @('set', '{}', 'AppExit', 'Default', 'Restart')\n",
+            "  Invoke-Nssm -Args @('set', '{}', 'AppStdout', '{}')\n",
+            "  Invoke-Nssm -Args @('set', '{}', 'AppStderr', '{}')\n",
+            "  Invoke-Nssm -Args @('start', '{}')\n",
+            "  Set-Content -Path $resultPath -Value 'ok' -Encoding UTF8\n",
+            "  exit 0\n",
+            "}} catch {{\n",
+            "  Set-Content -Path $resultPath -Value $_.Exception.Message -Encoding UTF8\n",
+            "  exit 1\n",
+            "}}\n"
+        ),
+        powershell_single_quote(&nssm_path.to_string_lossy()),
+        powershell_single_quote(&result_path.to_string_lossy()),
+        powershell_single_quote(service_name),
+        powershell_single_quote(service_name),
+        install_args_ps,
+        powershell_single_quote(service_name),
+        powershell_single_quote(&home_dir.to_string_lossy()),
+        powershell_single_quote(service_name),
+        powershell_single_quote(service_name),
+        powershell_single_quote(service_name),
+        powershell_single_quote(service_name),
+        powershell_single_quote(&stdout_log.to_string_lossy()),
+        powershell_single_quote(service_name),
+        powershell_single_quote(&stderr_log.to_string_lossy()),
+        powershell_single_quote(service_name),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn build_windows_elevated_powershell_command(script_path: &Path) -> Vec<String> {
+    vec![
+        "-NoProfile".to_string(),
+        "-ExecutionPolicy".to_string(),
+        "Bypass".to_string(),
+        "-Command".to_string(),
+        format!(
+            "$p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{}') -Wait -PassThru; exit $p.ExitCode",
+            powershell_single_quote(&script_path.to_string_lossy())
+        ),
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn build_windows_relaunch_as_admin_command(exe_path: &Path) -> Vec<String> {
+    vec![
+        "-NoProfile".to_string(),
+        "-ExecutionPolicy".to_string(),
+        "Bypass".to_string(),
+        "-Command".to_string(),
+        format!(
+            "Start-Process -FilePath '{}' -Verb RunAs",
+            powershell_single_quote(&exe_path.to_string_lossy())
+        ),
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn run_elevated_powershell_file(script_path: &Path) -> Result<String, String> {
+    let args = build_windows_elevated_powershell_command(script_path);
+    let arg_refs = args.iter().map(|arg| arg.as_str()).collect::<Vec<_>>();
+    run_windows_command_direct(Path::new("powershell.exe"), &arg_refs)
+}
+
+#[cfg(target_os = "windows")]
+fn is_windows_admin_required_error(error: &str) -> bool {
+    let normalized = error.to_lowercase();
+    normalized.contains("access is denied")
+        || normalized.contains("administrator access is needed")
+        || error.contains("拒绝访问")
+}
+
+#[cfg(target_os = "windows")]
+fn install_gateway_service_via_bundled_nssm_elevated(app: &AppHandle, step: &str) -> Result<String, String> {
+    let nssm_path = resolve_windows_nssm_executable(app)
+        .ok_or_else(|| "未找到可用的 nssm.exe（内置和系统 PATH 均未命中）".to_string())?;
+    let openclaw_bin = detect_openclaw_bin_path()
+        .ok_or_else(|| "未找到 openclaw 可执行文件，无法安装网关服务".to_string())?;
+    let node_bin_dir = resolve_active_node_bin_dir()
+        .ok_or_else(|| "未找到 node 运行目录，无法安装网关服务".to_string())?;
+    let home_dir = dirs::home_dir().ok_or_else(|| "无法获取用户主目录".to_string())?;
+    let service_script_path = write_windows_gateway_service_script(&home_dir, &openclaw_bin, &node_bin_dir)?;
+    let service_dir = home_dir.join(".openclaw").join("service");
+    std::fs::create_dir_all(&service_dir).map_err(|e| format!("创建服务目录失败: {}", e))?;
+    let result_path = service_dir.join("install-gateway-service.result.txt");
+    let elevated_script_path = service_dir.join("install-gateway-service.ps1");
+    let service_name = windows_gateway_service_name();
+    let cmd_exe = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
+    let log_dir = home_dir.join(".openclaw").join("logs");
+    std::fs::create_dir_all(&log_dir).map_err(|e| format!("创建服务日志目录失败: {}", e))?;
+    let stdout_log = log_dir.join("gateway-service.stdout.log");
+    let stderr_log = log_dir.join("gateway-service.stderr.log");
+    let script = build_windows_gateway_service_install_script(
+        &nssm_path,
+        service_name,
+        &cmd_exe,
+        &service_script_path,
+        &home_dir,
+        &stdout_log,
+        &stderr_log,
+        &result_path,
+    );
+    std::fs::write(&elevated_script_path, script).map_err(|e| format!("写入提权安装脚本失败: {}", e))?;
+
+    emit_log(app, step, "检测到需要管理员权限，正在请求 UAC 提权...", "warn");
+    match run_elevated_powershell_file(&elevated_script_path) {
+        Ok(_) => Ok(format!("网关服务已通过内置 nssm 安装: {}", service_name)),
+        Err(error) => {
+            let detail = std::fs::read_to_string(&result_path)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty() && value != "ok")
+                .unwrap_or(error);
+            Err(detail)
+        }
     }
-    run_shell(&command)
 }
 
 #[cfg(target_os = "windows")]
@@ -2442,7 +2886,6 @@ fn install_gateway_service_via_bundled_nssm(app: &AppHandle, step: &str) -> Resu
     let script_path = write_windows_gateway_service_script(&home_dir, &openclaw_bin, &node_bin_dir)?;
     let service_name = windows_gateway_service_name();
     let cmd_exe = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
-    let script_path_str = script_path.to_string_lossy().to_string();
     let home_dir_str = home_dir.to_string_lossy().to_string();
     let log_dir = home_dir.join(".openclaw").join("logs");
     std::fs::create_dir_all(&log_dir).map_err(|e| format!("创建服务日志目录失败: {}", e))?;
@@ -2457,19 +2900,13 @@ fn install_gateway_service_via_bundled_nssm(app: &AppHandle, step: &str) -> Resu
     let _ = run_nssm_command_with_log(app, step, &nssm_path, &["stop", service_name]);
     let _ = run_nssm_command_with_log(app, step, &nssm_path, &["remove", service_name, "confirm"]);
 
+    let install_args = build_windows_nssm_service_install_args(service_name, &cmd_exe, &script_path);
+    let install_arg_refs = install_args.iter().map(|arg| arg.as_str()).collect::<Vec<_>>();
     run_nssm_command_with_log(
         app,
         step,
         &nssm_path,
-        &[
-            "install",
-            service_name,
-            &cmd_exe,
-            "/d",
-            "/s",
-            "/c",
-            script_path_str.as_str(),
-        ],
+        &install_arg_refs,
     )?;
     run_nssm_command_with_log(app, step, &nssm_path, &["set", service_name, "AppDirectory", home_dir_str.as_str()])?;
     run_nssm_command_with_log(app, step, &nssm_path, &["set", service_name, "Description", "OpenClaw Gateway"])?;
@@ -2495,11 +2932,25 @@ pub async fn install_gateway_service(app: AppHandle) -> Result<String, String> {
                 return Ok(message);
             }
             Err(error) => {
-                let message = if error.to_lowercase().contains("access is denied") {
-                    format!("网关服务安装失败（需要管理员权限）: {}", error)
-                } else {
-                    format!("网关服务安装失败: {}", error)
-                };
+                if is_windows_admin_required_error(&error) {
+                    match install_gateway_service_via_bundled_nssm_elevated(&app, step) {
+                        Ok(message) => {
+                            emit_log(&app, step, &message, "success");
+                            return Ok(message);
+                        }
+                        Err(elevated_error) => {
+                            let message = if is_windows_admin_required_error(&elevated_error) {
+                                format!("网关服务安装失败（需要管理员权限）: {}", elevated_error)
+                            } else {
+                                format!("网关服务安装失败: {}", elevated_error)
+                            };
+                            emit_log(&app, step, &message, "error");
+                            return Err(message);
+                        }
+                    }
+                }
+
+                let message = format!("网关服务安装失败: {}", error);
                 emit_log(&app, step, &message, "error");
                 return Err(message);
             }
@@ -3230,6 +3681,34 @@ pub async fn open_web_ui() -> Result<String, String> {
     }
 
     Ok(format!("已打开 Dashboard: {}", url))
+}
+
+#[tauri::command]
+pub async fn relaunch_as_admin(app: AppHandle) -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let exe_path = std::env::current_exe().map_err(|e| format!("无法获取当前程序路径: {}", e))?;
+        let args = build_windows_relaunch_as_admin_command(&exe_path);
+
+        Command::new("powershell.exe")
+            .args(args)
+            .spawn()
+            .map_err(|e| format!("请求管理员权限失败: {}", e))?;
+
+        let app_handle = app.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(400));
+            app_handle.exit(0);
+        });
+
+        return Ok("正在以管理员身份重新启动应用...".to_string());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        Err("仅支持 Windows 管理员重启".to_string())
+    }
 }
 
 fn extract_dashboard_url(output: &str) -> Option<String> {

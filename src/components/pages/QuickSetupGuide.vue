@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/tauri'
 import {
   Bot,
   CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   Loader2,
   MessageSquareMore,
@@ -11,32 +12,47 @@ import {
   Rocket,
   ShieldCheck,
   Sparkles,
+  X,
 } from 'lucide-vue-next'
 import Button from '../ui/Button.vue'
 import Input from '../ui/Input.vue'
 import { isPrimaryModelPlaceholder } from '../../domain/configValidation'
-import { waitForGatewayReady } from '../../domain/gatewayStartup'
+import { DEFAULT_GATEWAY_READY_OPTIONS, waitForGatewayReady } from '../../domain/gatewayStartup'
+import { formatGatewayInstallError, isAdminRequiredGatewayInstallError } from '../../domain/postInstallError'
 import {
+  applyQuickSetupGatewayOptions,
+  applyQuickSetupModelPreset,
+  clearQuickSetupManagedChannels,
   QUICK_SETUP_CHANNEL_PRESETS,
   QUICK_SETUP_PROVIDER_PRESETS,
   QUICK_SETUP_STEPS,
   canSkipQuickSetupStep,
   findProviderPreset,
-  getGatewayInstallPlan,
+  sanitizeQuickSetupChannelConfig,
   type QuickSetupChannelId,
   type QuickSetupProviderId,
   type QuickSetupStepId,
 } from '../../domain/quickSetupGuide'
+import {
+  clearQuickSetupSession,
+  createQuickSetupSessionSnapshot,
+  loadQuickSetupSession,
+  resolveQuickSetupSessionStepIndex,
+  saveQuickSetupSession,
+  type QuickSetupSessionStatus,
+} from '../../domain/quickSetupSession'
 import { resolveDingtalkChannelNode } from '../../domain/dingtalkPlugin'
 import type { ConfigFileInfo, ModelSelectionInfo, OpenClawConfig, ProviderInfo } from '../../types/config'
 
 const props = defineProps<{
   showToast: (type: 'success' | 'error', message: string) => void
+  showCloseAction?: boolean
   systemOs: 'windows' | 'macos' | 'linux'
 }>()
 
 const emit = defineEmits<{
   complete: []
+  close: []
 }>()
 
 interface ChannelExtensionStatus {
@@ -54,6 +70,8 @@ const busy = ref(false)
 const busyMessage = ref('')
 const errorMessage = ref('')
 const infoMessage = ref('')
+const adminRelaunching = ref(false)
+const adminRelaunchMessage = ref('')
 
 const currentConfig = ref<OpenClawConfig | null>(null)
 const fileInfo = ref<ConfigFileInfo | null>(null)
@@ -66,25 +84,28 @@ const providerApiKey = ref('')
 const modelQuery = ref('')
 const fetchedModels = ref<string[]>([])
 const loadingModels = ref(false)
-const showModelDropdown = ref(false)
 
 const selectedChannelId = ref<QuickSetupChannelId>('feishu')
 const channelIdValue = ref('')
 const channelSecretValue = ref('')
+const browserDefaultProfileEnabled = ref(false)
+const toolsFullProfileEnabled = ref(false)
 
 const savedStepIds = ref<QuickSetupStepId[]>([])
+const restoringSession = ref(false)
 
 const currentStep = computed(() => QUICK_SETUP_STEPS[stepIndex.value])
+const canRelaunchAsAdmin = computed(() => isAdminRequiredGatewayInstallError(errorMessage.value))
 const currentProviderPreset = computed(() => findProviderPreset(selectedProviderId.value)!)
 const currentChannelPreset = computed(
   () => QUICK_SETUP_CHANNEL_PRESETS.find((item) => item.id === selectedChannelId.value) ?? QUICK_SETUP_CHANNEL_PRESETS[0]
 )
-const gatewayPlan = computed(() => getGatewayInstallPlan(props.systemOs))
 const hasReadyPrimaryModel = computed(() => {
   const primary = modelSelection.value.primary
   return Boolean(primary && !isPrimaryModelPlaceholder(primary))
 })
 const isExtensionChannel = computed(() => selectedChannelId.value === 'feishu' || selectedChannelId.value === 'dingtalk')
+const channelNeedsPrimaryField = computed(() => isExtensionChannel.value || selectedChannelId.value === 'slack')
 const extensionInstalled = computed(() => {
   if (selectedChannelId.value === 'feishu') return channelExtensionStatus.value.feishuInstalled
   if (selectedChannelId.value === 'dingtalk') return channelExtensionStatus.value.dingtalkInstalled
@@ -128,8 +149,17 @@ const selectedChannelSummary = computed(() => {
   if (isExtensionChannel.value) {
     return channelIdValue.value.trim() || maskSecret(channelSecretValue.value)
   }
+  if (selectedChannelId.value === 'slack') {
+    return maskSecret(channelSecretValue.value) || channelIdValue.value.trim()
+  }
   return maskSecret(channelSecretValue.value)
 })
+const browserProfileStatusText = computed(() =>
+  browserDefaultProfileEnabled.value ? '已启用浏览器默认配置' : '未启用'
+)
+const toolsProfileStatusText = computed(() =>
+  toolsFullProfileEnabled.value ? '已启用完整工具能力' : '未启用'
+)
 
 const asRecord = (value: unknown): Record<string, any> =>
   value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, any>) : {}
@@ -140,10 +170,56 @@ const markStepSaved = (stepId: QuickSetupStepId) => {
   }
 }
 
+const persistQuickSetupSession = (status: QuickSetupSessionStatus = 'in_progress') => {
+  if (restoringSession.value) return
+  const currentStepId = QUICK_SETUP_STEPS[stepIndex.value]?.id ?? 'model'
+  saveQuickSetupSession(createQuickSetupSessionSnapshot({
+    status,
+    stepId: currentStepId,
+    savedStepIds: savedStepIds.value,
+    selectedProviderId: selectedProviderId.value,
+    providerApiKey: providerApiKey.value,
+    modelQuery: modelQuery.value,
+    selectedChannelId: selectedChannelId.value,
+    channelIdValue: channelIdValue.value,
+    channelSecretValue: channelSecretValue.value,
+    browserDefaultProfileEnabled: browserDefaultProfileEnabled.value,
+    toolsFullProfileEnabled: toolsFullProfileEnabled.value,
+  }))
+}
+
+const restoreQuickSetupSessionState = () => {
+  const snapshot = loadQuickSetupSession()
+  if (!snapshot) return
+
+  restoringSession.value = true
+  try {
+    selectedProviderId.value = snapshot.selectedProviderId
+    selectedChannelId.value = snapshot.selectedChannelId
+    providerApiKey.value = snapshot.providerApiKey
+    modelQuery.value = snapshot.modelQuery
+    channelIdValue.value = snapshot.channelIdValue
+    channelSecretValue.value = snapshot.channelSecretValue
+    browserDefaultProfileEnabled.value = snapshot.browserDefaultProfileEnabled
+    toolsFullProfileEnabled.value = snapshot.toolsFullProfileEnabled
+    savedStepIds.value = [...snapshot.savedStepIds]
+    stepIndex.value = resolveQuickSetupSessionStepIndex(snapshot)
+
+    if (snapshot.status === 'awaiting_admin_relaunch') {
+      errorMessage.value = ''
+      adminRelaunchMessage.value = ''
+      infoMessage.value = '已恢复管理员重启前的快速引导进度，请继续完成网关安装。'
+    }
+  } finally {
+    restoringSession.value = false
+  }
+}
+
 const setBusy = (message: string) => {
   busy.value = true
   busyMessage.value = message
   errorMessage.value = ''
+  adminRelaunchMessage.value = ''
 }
 
 const clearBusy = () => {
@@ -208,6 +284,7 @@ const hydrateDraftsFromConfig = () => {
       .find((item) => item && (item.name === providerName || item.baseUrl === providerConfig?.baseUrl))
     if (preset) {
       selectedProviderId.value = preset.id
+      modelQuery.value = modelId || currentProviderPreset.value.suggestedModels[0]?.id || ''
     }
     markStepSaved('model')
   } else if (!modelQuery.value) {
@@ -220,6 +297,11 @@ const hydrateDraftsFromConfig = () => {
   const telegram = asRecord(channels.telegram)
   const discord = asRecord(channels.discord)
   const slack = asRecord(channels.slack)
+  const browser = asRecord(currentConfig.value.browser)
+  const tools = asRecord(currentConfig.value.tools)
+
+  browserDefaultProfileEnabled.value = browser.defaultProfile === 'openclaw'
+  toolsFullProfileEnabled.value = tools.profile === 'full'
 
   if (feishu.appId && feishu.appSecret) {
     selectedChannelId.value = 'feishu'
@@ -285,17 +367,11 @@ const refreshModels = async () => {
       baseUrl: currentProviderPreset.value.baseUrl,
       apiKey,
     })
-    showModelDropdown.value = true
   } catch (error) {
     errorMessage.value = `模型列表拉取失败：${error}`
   } finally {
     loadingModels.value = false
   }
-}
-
-const selectModelOption = (modelId: string) => {
-  modelQuery.value = modelId
-  showModelDropdown.value = false
 }
 
 const saveModelStep = async () => {
@@ -308,29 +384,7 @@ const saveModelStep = async () => {
   setBusy('正在写入模型配置...')
   try {
     const preset = currentProviderPreset.value
-    let nextConfig = await invoke<OpenClawConfig>('upsert_provider', {
-      config: currentConfig.value,
-      name: preset.name,
-      baseUrl: preset.baseUrl,
-      apiKey,
-      api: null,
-    })
-
-    const provider = nextConfig.models?.providers?.[preset.name]
-    const modelExists = provider?.models?.some((item) => item.id === modelId)
-    if (!modelExists) {
-      nextConfig = await invoke<OpenClawConfig>('add_model_to_provider', {
-        config: nextConfig,
-        providerName: preset.name,
-        modelId,
-        modelName: null,
-      })
-    }
-
-    nextConfig = await invoke<OpenClawConfig>('set_primary_model', {
-      config: nextConfig,
-      modelPath: `${preset.name}/${modelId}`,
-    })
+    const nextConfig = applyQuickSetupModelPreset(currentConfig.value, preset, apiKey, modelId)
 
     currentConfig.value = nextConfig
     await saveConfigToDisk()
@@ -362,6 +416,7 @@ const ensureGenericChannelNode = (channelId: 'telegram' | 'discord' | 'slack') =
 
 const saveGenericChannel = async () => {
   const secret = channelSecretValue.value.trim()
+  const primaryField = channelIdValue.value.trim()
   if (!secret) throw new Error(`${currentChannelPreset.value.secretLabel} 不能为空`)
   if (!currentConfig.value) throw new Error('配置文件未加载')
 
@@ -385,8 +440,10 @@ const saveGenericChannel = async () => {
 
   if (selectedChannelId.value === 'slack') {
     const node = ensureGenericChannelNode('slack')
+    if (!primaryField) throw new Error('Signing Secret 不能为空')
     node.enabled = true
     node.botToken = secret
+    node.signingSecret = primaryField
     node.mode ??= 'http'
     node.webhookPath ??= '/webhooks/slack'
     node.dmPolicy ??= 'pairing'
@@ -398,9 +455,17 @@ const saveGenericChannel = async () => {
   await saveConfigToDisk()
 }
 
+const resetManagedQuickSetupChannels = async () => {
+  if (!currentConfig.value) throw new Error('配置文件未加载')
+  currentConfig.value = clearQuickSetupManagedChannels(currentConfig.value)
+  await saveConfigToDisk()
+}
+
 const saveChannelStep = async () => {
   setBusy('正在写入通信渠道配置...')
   try {
+    await resetManagedQuickSetupChannels()
+
     if (selectedChannelId.value === 'feishu') {
       const appId = channelIdValue.value.trim()
       const appSecret = channelSecretValue.value.trim()
@@ -435,29 +500,75 @@ const saveChannelStep = async () => {
   }
 }
 
+const openManualOnboard = async () => {
+  try {
+    await invoke<string>('open_terminal_with_command', {
+      command: 'openclaw onboard --install-daemon',
+    })
+    infoMessage.value = '已打开终端执行 openclaw onboard --install-daemon'
+    errorMessage.value = ''
+    props.showToast('success', '已打开终端执行手动配置命令')
+  } catch (error) {
+    const message = formatGatewayInstallError(`打开终端失败：${error}`)
+    errorMessage.value = message
+    props.showToast('error', message)
+  }
+}
+
+const relaunchAsAdmin = async () => {
+  adminRelaunching.value = true
+  adminRelaunchMessage.value = ''
+
+  try {
+    persistQuickSetupSession('awaiting_admin_relaunch')
+    adminRelaunchMessage.value = await invoke<string>('relaunch_as_admin')
+  } catch (error) {
+    persistQuickSetupSession('in_progress')
+    errorMessage.value = formatGatewayInstallError(`管理员重启失败：${error}`)
+  } finally {
+    adminRelaunching.value = false
+  }
+}
+
+const closeQuickSetup = () => {
+  if (busy.value || adminRelaunching.value) return
+  clearQuickSetupSession()
+  emit('close')
+}
+
 const installGatewayAndEnterDashboard = async () => {
   if (!hasReadyPrimaryModel.value) {
     stepIndex.value = 0
     throw new Error('进入工作台前需要先完成有效主模型配置')
   }
+  if (!currentConfig.value) {
+    throw new Error('配置文件未加载')
+  }
 
-  setBusy('正在安装并启动网关...')
+  currentConfig.value = sanitizeQuickSetupChannelConfig(currentConfig.value)
+  currentConfig.value = applyQuickSetupGatewayOptions(currentConfig.value, {
+    browserDefaultProfileEnabled: browserDefaultProfileEnabled.value,
+    toolsFullProfileEnabled: toolsFullProfileEnabled.value,
+  })
+
   try {
+    setBusy('正在保存网关关键配置...')
+    await saveConfigToDisk()
+
+    setBusy('正在安装并启动网关...')
     await invoke<string>('install_gateway_service')
     if (props.systemOs !== 'windows') {
       setBusy('正在启动网关服务...')
       await invoke<string>('start_gateway')
     }
     setBusy('正在等待网关健康检查通过...')
-    const ready = await waitForGatewayReady(() => invoke<boolean>('health_check_gateway'), {
-      maxAttempts: 24,
-      intervalMs: 1500,
-    })
+    const ready = await waitForGatewayReady(() => invoke<boolean>('health_check_gateway'), DEFAULT_GATEWAY_READY_OPTIONS)
     if (!ready) {
       throw new Error('网关在预期时间内未完成启动，请稍后重试')
     }
 
     markStepSaved('gateway')
+    clearQuickSetupSession()
     infoMessage.value = '快速引导完成，正在进入工作台。'
     props.showToast('success', '网关已启动，正在进入工作台')
     emit('complete')
@@ -480,21 +591,17 @@ const handlePrimaryAction = async () => {
     }
     await installGatewayAndEnterDashboard()
   } catch (error) {
-    errorMessage.value = String(error)
-    props.showToast('error', String(error))
+    const message = formatGatewayInstallError(error)
+    errorMessage.value = message
+    props.showToast('error', message)
   }
 }
 
 watch(selectedProviderId, () => {
   fetchedModels.value = []
-  showModelDropdown.value = false
   const providerName = currentProviderPreset.value.name
-  if (currentConfig.value?.models?.providers?.[providerName]?.apiKey) {
-    providerApiKey.value = currentConfig.value.models.providers[providerName]?.apiKey || ''
-  }
-  if (!modelQuery.value) {
-    modelQuery.value = currentProviderPreset.value.suggestedModels[0]?.id || ''
-  }
+  providerApiKey.value = currentConfig.value?.models?.providers?.[providerName]?.apiKey || ''
+  modelQuery.value = currentProviderPreset.value.suggestedModels[0]?.id || ''
 })
 
 watch(selectedChannelId, () => {
@@ -503,10 +610,30 @@ watch(selectedChannelId, () => {
   errorMessage.value = ''
 })
 
+watch(
+  [
+    stepIndex,
+    savedStepIds,
+    selectedProviderId,
+    providerApiKey,
+    modelQuery,
+    selectedChannelId,
+    channelIdValue,
+    channelSecretValue,
+    browserDefaultProfileEnabled,
+    toolsFullProfileEnabled,
+  ],
+  () => {
+    persistQuickSetupSession('in_progress')
+  },
+  { deep: true }
+)
+
 onMounted(async () => {
   setBusy('正在准备快速引导...')
   try {
     await ensureDefaultConfigReady()
+    restoreQuickSetupSessionState()
   } catch (error) {
     errorMessage.value = `初始化快速引导失败：${error}`
   } finally {
@@ -518,20 +645,18 @@ onMounted(async () => {
 <template>
   <div class="oc-page-root h-full min-h-0">
     <div class="grid h-full min-h-0 gap-4 xl:grid-cols-[280px,minmax(0,1fr)]">
-      <aside class="oc-panel flex min-h-0 flex-col p-4">
-        <div class="rounded-[18px] border p-4" style="border-color: var(--oc-card-border); background: linear-gradient(135deg, color-mix(in srgb, var(--oc-accent-soft) 72%, var(--oc-card) 28%), var(--oc-card));">
+      <aside class="oc-panel oc-quick-setup-sidebar flex min-h-0 flex-col p-4">
+        <div class="oc-quick-setup-hero rounded-[18px] border p-4" style="border-color: color-mix(in srgb, var(--oc-accent) 10%, var(--oc-card-border));">
           <div class="flex items-center gap-3">
-            <div class="flex h-11 w-11 items-center justify-center rounded-full" style="background: color-mix(in srgb, var(--oc-accent) 18%, transparent); color: var(--oc-accent);">
+            <div class="flex h-11 w-11 items-center justify-center rounded-full" style="background: color-mix(in srgb, var(--oc-accent) 10%, transparent); color: var(--oc-accent);">
               <Sparkles class="h-5 w-5" />
             </div>
             <div>
               <p class="text-base font-semibold" style="color: var(--oc-text-primary);">快速引导</p>
-              <p class="text-xs" style="color: var(--oc-text-secondary);">统一安装后门禁与首次配置入口</p>
+              <p class="text-xs" style="color: var(--oc-text-secondary);">首次配置入口</p>
             </div>
           </div>
-          <p class="mt-3 text-sm leading-6" style="color: var(--oc-text-secondary);">
-            先写入默认配置，再用最少步骤完成模型、通信渠道与网关安装，所有内容都会同步到正式配置页。
-          </p>
+          <p class="mt-3 text-sm leading-6" style="color: var(--oc-text-secondary);">三步完成模型、渠道和网关配置。</p>
         </div>
 
         <div class="mt-4 space-y-2">
@@ -539,10 +664,10 @@ onMounted(async () => {
             v-for="(step, index) in QUICK_SETUP_STEPS"
             :key="step.id"
             type="button"
-            class="w-full rounded-[14px] border px-4 py-3 text-left transition-all"
+            class="oc-quick-setup-step w-full rounded-[14px] border px-4 py-3 text-left transition-all"
             :style="{
-              borderColor: index === stepIndex ? 'var(--oc-card-border-strong)' : 'var(--oc-card-border)',
-              background: index === stepIndex ? 'var(--oc-item-active)' : 'var(--oc-card-elevated)',
+              borderColor: index === stepIndex ? 'color-mix(in srgb, var(--oc-accent) 18%, var(--oc-card-border))' : 'var(--oc-card-border)',
+              background: index === stepIndex ? 'color-mix(in srgb, var(--oc-accent-soft) 28%, var(--oc-card) 72%)' : 'var(--oc-card-elevated)',
             }"
             @click="stepIndex = index"
           >
@@ -559,14 +684,14 @@ onMounted(async () => {
           </button>
         </div>
 
-        <div class="mt-auto rounded-[14px] border p-3 text-xs leading-5" style="border-color: var(--oc-divider); background: color-mix(in srgb, var(--oc-card-elevated) 86%, transparent); color: var(--oc-text-secondary);">
+        <div class="mt-auto rounded-[14px] border p-3 text-xs leading-5" style="border-color: color-mix(in srgb, var(--oc-accent) 10%, var(--oc-card-border)); background: color-mix(in srgb, var(--oc-accent-soft) 18%, var(--oc-card) 82%); color: var(--oc-text-secondary);">
           <p>当前主模型：<span style="color: var(--oc-text-primary);">{{ primaryModelPath || '未设置' }}</span></p>
           <p class="mt-1">当前渠道：<span style="color: var(--oc-text-primary);">{{ currentChannelPreset.name }}</span></p>
           <p class="mt-1">当前配置文件：<span style="color: var(--oc-text-primary);">{{ fileInfo?.fileName || 'openclaw.json' }}</span></p>
         </div>
       </aside>
 
-      <section class="oc-panel flex min-h-0 flex-col p-5">
+      <section class="oc-panel oc-quick-setup-main flex min-h-0 flex-col p-5">
         <div class="flex items-start justify-between gap-4 border-b pb-4" style="border-color: var(--oc-divider-soft);">
           <div>
             <div class="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.18em]" style="color: var(--oc-text-muted);">
@@ -576,101 +701,92 @@ onMounted(async () => {
             <h2 class="mt-2 text-2xl font-semibold" style="color: var(--oc-text-primary);">{{ currentStep.title }}</h2>
             <p class="mt-2 text-sm leading-6" style="color: var(--oc-text-secondary);">{{ currentStep.subtitle }}</p>
           </div>
-          <div class="rounded-full px-3 py-1 text-xs font-medium" style="background: color-mix(in srgb, var(--oc-card-elevated) 88%, transparent); color: var(--oc-text-secondary);">
-            跳过仅支持前两步
-          </div>
+          <Button v-if="showCloseAction" variant="outline" :disabled="busy || adminRelaunching" @click="closeQuickSetup">
+            <X class="h-4 w-4" />
+            关闭
+          </Button>
         </div>
 
-        <div v-if="errorMessage" class="mt-4 rounded-[14px] border px-4 py-3 text-sm" style="border-color: color-mix(in srgb, var(--oc-danger) 32%, transparent); background: color-mix(in srgb, var(--oc-danger) 9%, transparent); color: var(--oc-danger);">
+        <div v-if="errorMessage" class="mt-4 rounded-[14px] border px-4 py-3 text-sm whitespace-pre-line" style="border-color: color-mix(in srgb, var(--oc-danger) 32%, transparent); background: color-mix(in srgb, var(--oc-danger) 9%, transparent); color: var(--oc-danger);">
           {{ errorMessage }}
         </div>
-        <div v-else-if="infoMessage || busyMessage" class="mt-4 rounded-[14px] border px-4 py-3 text-sm" style="border-color: color-mix(in srgb, var(--oc-accent) 28%, transparent); background: color-mix(in srgb, var(--oc-accent) 10%, transparent); color: var(--oc-text-secondary);">
+        <div v-if="canRelaunchAsAdmin" class="mt-3 flex flex-col items-start gap-3">
+          <Button :disabled="adminRelaunching" @click="relaunchAsAdmin">
+            <ShieldCheck class="h-4 w-4" />
+            {{ adminRelaunching ? '正在请求管理员权限...' : '以管理员身份重启' }}
+          </Button>
+          <p v-if="adminRelaunchMessage" class="text-sm whitespace-pre-line" style="color: var(--oc-text-secondary);">
+            {{ adminRelaunchMessage }}
+          </p>
+        </div>
+        <div v-else-if="infoMessage || busyMessage" class="mt-4 rounded-[14px] border px-4 py-3 text-sm" style="border-color: color-mix(in srgb, var(--oc-accent) 14%, transparent); background: color-mix(in srgb, var(--oc-accent) 4%, transparent); color: var(--oc-text-secondary);">
           <span v-if="busy" class="inline-flex items-center gap-2"><Loader2 class="h-4 w-4 animate-spin" />{{ busyMessage }}</span>
           <span v-else>{{ infoMessage }}</span>
         </div>
 
-        <div class="mt-5 min-h-0 flex-1 overflow-auto pr-1">
-          <div v-if="currentStep.id === 'model'" class="space-y-5">
-            <div>
-              <p class="mb-3 text-sm font-medium" style="color: var(--oc-text-primary);">选择服务商预设</p>
-              <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                <button
-                  v-for="preset in QUICK_SETUP_PROVIDER_PRESETS"
-                  :key="preset.id"
-                  type="button"
-                  class="rounded-[16px] border p-4 text-left transition-all"
-                  :style="{
-                    borderColor: selectedProviderId === preset.id ? 'var(--oc-card-border-strong)' : 'var(--oc-card-border)',
-                    background: selectedProviderId === preset.id ? 'var(--oc-item-active)' : 'var(--oc-card-elevated)',
-                  }"
-                  @click="selectedProviderId = preset.id"
+        <div class="mt-5 flex min-h-0 flex-1 flex-col">
+          <div v-if="currentStep.id === 'model'" class="grid min-h-0 flex-1 gap-4 xl:grid-cols-[minmax(0,280px),minmax(0,1fr),minmax(0,1fr)]">
+            <div class="rounded-[18px] border p-4" style="border-color: color-mix(in srgb, var(--oc-accent) 10%, var(--oc-card-border)); background: var(--oc-card);">
+              <label class="mb-2 block text-sm font-medium" style="color: var(--oc-text-secondary);">预设服务商</label>
+              <div class="relative">
+                <select
+                  v-model="selectedProviderId"
+                  class="oc-input w-full appearance-none pr-10"
+                  aria-label="选择预设服务商"
                 >
-                  <div class="flex items-center justify-between gap-3">
-                    <p class="text-sm font-semibold" style="color: var(--oc-text-primary);">{{ preset.displayName }}</p>
-                    <ShieldCheck class="h-4 w-4" :style="{ color: selectedProviderId === preset.id ? 'var(--oc-accent)' : 'var(--oc-text-quiet)' }" />
-                  </div>
-                  <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-secondary);">{{ preset.description }}</p>
-                  <p class="mt-3 text-[11px] leading-5" style="color: var(--oc-text-muted);">{{ preset.baseUrl }}</p>
-                </button>
+                  <option
+                    v-for="preset in QUICK_SETUP_PROVIDER_PRESETS"
+                    :key="preset.id"
+                    :value="preset.id"
+                  >
+                    {{ preset.displayName }}
+                  </option>
+                </select>
+                <ChevronDown class="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2" style="color: var(--oc-text-muted);" />
               </div>
+              <p class="mt-3 text-sm font-medium" style="color: var(--oc-text-primary);">{{ currentProviderPreset.displayName }}</p>
+              <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-secondary);">{{ currentProviderPreset.description }}</p>
+              <p class="mt-3 break-all text-[11px] leading-5" style="color: var(--oc-text-muted);">{{ currentProviderPreset.baseUrl }}</p>
             </div>
 
-            <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr),minmax(0,1fr)]">
-              <div class="rounded-[16px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
-                <label class="mb-2 block text-sm font-medium" style="color: var(--oc-text-secondary);">API Key</label>
-                <Input v-model="providerApiKey" type="password" placeholder="输入服务商 API Key" autocomplete="off" />
-                <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-muted);">
-                  当前配置页中同名服务商的 Key 也会在这里复用：{{ currentProviderApiKey ? '已检测到已有 Key' : '未检测到' }}
-                </p>
-              </div>
+            <div class="rounded-[18px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
+              <label class="mb-2 block text-sm font-medium" style="color: var(--oc-text-secondary);">API Key</label>
+              <Input v-model="providerApiKey" type="password" placeholder="输入服务商 API Key" autocomplete="off" />
+              <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-muted);">
+                当前配置页中同名服务商的 Key 也会在这里复用：{{ currentProviderApiKey ? '已检测到已有 Key' : '未检测到' }}
+              </p>
+            </div>
 
-              <div class="rounded-[16px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
-                <div class="mb-2 flex items-center justify-between gap-3">
-                  <label class="block text-sm font-medium" style="color: var(--oc-text-secondary);">模型 ID / 名称</label>
-                  <button type="button" class="oc-toolbar-btn h-8 px-3 text-xs" :disabled="loadingModels || busy" @click="refreshModels">
-                    <Loader2 v-if="loadingModels" class="h-3.5 w-3.5 animate-spin" />
-                    <RefreshCw v-else class="h-3.5 w-3.5" />
-                    刷新列表
-                  </button>
-                </div>
-                <div class="relative">
-                  <Input v-model="modelQuery" placeholder="搜索模型或直接输入模型 ID" @focus="showModelDropdown = true" />
-                  <div v-if="showModelDropdown && filteredModelOptions.length > 0" class="absolute z-20 mt-2 max-h-56 w-full overflow-auto rounded-[14px] border p-2 shadow-lg" style="border-color: var(--oc-card-border); background: var(--oc-card); box-shadow: var(--oc-shadow-popover);">
-                    <button
-                      v-for="item in filteredModelOptions"
-                      :key="item.id"
-                      type="button"
-                      class="w-full rounded-[10px] px-3 py-2 text-left text-sm transition-colors"
-                      style="color: var(--oc-text-secondary);"
-                      @click="selectModelOption(item.id)"
-                    >
-                      <div class="font-medium" style="color: var(--oc-text-primary);">{{ item.name }}</div>
-                      <div class="text-xs" style="color: var(--oc-text-muted);">{{ item.id }}</div>
-                    </button>
-                  </div>
-                </div>
-                <div class="mt-3 flex flex-wrap gap-2">
-                  <button
-                    v-for="item in currentProviderPreset.suggestedModels"
-                    :key="item.id"
-                    type="button"
-                    class="rounded-full border px-3 py-1.5 text-xs transition-colors"
-                    :style="{
-                      borderColor: modelQuery === item.id ? 'var(--oc-card-border-strong)' : 'var(--oc-card-border)',
-                      background: modelQuery === item.id ? 'var(--oc-item-active)' : 'transparent',
-                      color: modelQuery === item.id ? 'var(--oc-text-primary)' : 'var(--oc-text-secondary)',
-                    }"
-                    @click="modelQuery = item.id"
-                  >
-                    {{ item.name }}
-                  </button>
-                </div>
+            <div class="rounded-[18px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
+              <div class="mb-2 flex items-center justify-between gap-3">
+                <label class="block text-sm font-medium" style="color: var(--oc-text-secondary);">模型 ID / 名称</label>
+                <button type="button" class="oc-toolbar-btn h-8 px-3 text-xs" :disabled="loadingModels || busy" @click="refreshModels">
+                  <Loader2 v-if="loadingModels" class="h-3.5 w-3.5 animate-spin" />
+                  <RefreshCw v-else class="h-3.5 w-3.5" />
+                  刷新列表
+                </button>
               </div>
+              <input
+                v-model="modelQuery"
+                class="oc-input w-full"
+                list="quick-setup-model-options"
+                placeholder="搜索模型或直接输入模型 ID"
+                autocomplete="off"
+              />
+              <datalist id="quick-setup-model-options">
+                <option
+                  v-for="item in filteredModelOptions"
+                  :key="item.id"
+                  :value="item.id"
+                  :label="item.name"
+                >{{ item.name }}</option>
+              </datalist>
+              <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-muted);">支持直接输入自定义模型 ID；刷新后可从系统返回列表中快速选择。</p>
             </div>
           </div>
 
-          <div v-else-if="currentStep.id === 'channel'" class="space-y-5">
-            <div>
+          <div v-else-if="currentStep.id === 'channel'" class="grid min-h-0 flex-1 gap-4 xl:grid-cols-[minmax(0,1.05fr),minmax(0,1fr)]">
+            <div class="rounded-[18px] border p-4" style="border-color: color-mix(in srgb, var(--oc-accent) 10%, var(--oc-card-border)); background: var(--oc-card);">
               <p class="mb-3 text-sm font-medium" style="color: var(--oc-text-primary);">选择通信渠道</p>
               <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                 <button
@@ -695,59 +811,105 @@ onMounted(async () => {
               </div>
             </div>
 
-            <div class="grid gap-4 lg:grid-cols-2">
+            <div class="grid gap-4 lg:grid-rows-2">
               <div class="rounded-[16px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
                 <label class="mb-2 block text-sm font-medium" style="color: var(--oc-text-secondary);">{{ currentChannelPreset.placeholderLabel }}</label>
                 <Input
                   v-model="channelIdValue"
-                  :disabled="!isExtensionChannel"
-                  :placeholder="isExtensionChannel ? currentChannelPreset.placeholderLabel : '该渠道快速模式下无需填写此项'"
+                  :disabled="!channelNeedsPrimaryField"
+                  :placeholder="channelNeedsPrimaryField ? currentChannelPreset.placeholderLabel : '该渠道无需填写此项'"
                 />
-                <p class="mt-2 text-xs" style="color: var(--oc-text-muted);">
-                  {{ isExtensionChannel ? '飞书/钉钉仅需填写 ID 与 Key，扩展缺失时会自动安装。' : 'Telegram / Discord / Slack 只保留 token 快速接入。' }}
-                </p>
+                <p class="mt-2 text-xs" style="color: var(--oc-text-muted);">{{ currentChannelPreset.description }}</p>
               </div>
 
               <div class="rounded-[16px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
                 <label class="mb-2 block text-sm font-medium" style="color: var(--oc-text-secondary);">{{ currentChannelPreset.secretLabel }}</label>
                 <Input v-model="channelSecretValue" type="password" :placeholder="`输入${currentChannelPreset.secretLabel}`" autocomplete="off" />
-                <p class="mt-2 text-xs" style="color: var(--oc-text-muted);">
-                  保存后默认启用渠道，其余参数保留最精简默认值，并同步到正式通信渠道页。
-                </p>
+                <p class="mt-2 text-xs" style="color: var(--oc-text-muted);">仅写入当前选择且已填写的渠道配置。</p>
               </div>
             </div>
           </div>
 
-          <div v-else class="space-y-5">
-            <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr),minmax(0,1fr)]">
-              <div class="rounded-[16px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
-                <p class="text-sm font-semibold" style="color: var(--oc-text-primary);">当前配置摘要</p>
-                <div class="mt-3 space-y-2 text-sm" style="color: var(--oc-text-secondary);">
-                  <p>主模型：<span style="color: var(--oc-text-primary);">{{ primaryModelPath || '未配置' }}</span></p>
-                  <p>通信渠道：<span style="color: var(--oc-text-primary);">{{ currentChannelPreset.name }}</span></p>
-                  <p>渠道凭据：<span style="color: var(--oc-text-primary);">{{ selectedChannelSummary || '未配置' }}</span></p>
-                </div>
-              </div>
-
-              <div class="rounded-[16px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
-                <p class="text-sm font-semibold" style="color: var(--oc-text-primary);">当前系统执行计划</p>
-                <p class="mt-2 text-sm" style="color: var(--oc-text-secondary);">{{ gatewayPlan.summary }}</p>
-                <div class="mt-3 flex flex-wrap gap-2">
-                  <span
-                    v-for="command in gatewayPlan.commands"
-                    :key="command"
-                    class="rounded-full border px-3 py-1.5 text-xs"
-                    style="border-color: var(--oc-card-border); background: color-mix(in srgb, var(--oc-card) 88%, transparent); color: var(--oc-text-secondary);"
-                  >
-                    {{ command }}
-                  </span>
-                </div>
+          <div v-else class="grid min-h-0 flex-1 gap-4 lg:grid-cols-[minmax(0,0.94fr),minmax(0,1.06fr)]">
+            <div class="rounded-[16px] border p-4" style="border-color: color-mix(in srgb, var(--oc-accent) 8%, var(--oc-card-border)); background: color-mix(in srgb, var(--oc-accent-soft) 16%, var(--oc-card) 84%);">
+              <p class="text-sm font-semibold" style="color: var(--oc-text-primary);">当前配置摘要</p>
+              <div class="mt-3 space-y-2 text-sm" style="color: var(--oc-text-secondary);">
+                <p>主模型：<span style="color: var(--oc-text-primary);">{{ primaryModelPath || '未配置' }}</span></p>
+                <p>通信渠道：<span style="color: var(--oc-text-primary);">{{ currentChannelPreset.name }}</span></p>
+                <p>渠道凭据：<span style="color: var(--oc-text-primary);">{{ selectedChannelSummary || '未配置' }}</span></p>
+                <p>浏览器配置：<span style="color: var(--oc-text-primary);">{{ browserProfileStatusText }}</span></p>
+                <p>工具配置：<span style="color: var(--oc-text-primary);">{{ toolsProfileStatusText }}</span></p>
               </div>
             </div>
 
-            <div class="rounded-[16px] border p-4 text-sm leading-6" style="border-color: var(--oc-card-border); background: color-mix(in srgb, var(--oc-card-elevated) 88%, transparent); color: var(--oc-text-secondary);">
-              <p>网关安装完成后会自动等待健康检查通过，再进入工作台页面。</p>
-              <p class="mt-2">如果你前面跳过了模型步骤，这里会阻止进入工作台，并提示先完成有效主模型配置。</p>
+            <div class="rounded-[16px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <p class="text-sm font-semibold" style="color: var(--oc-text-primary);">关键配置</p>
+                  <p class="mt-2 text-sm leading-6" style="color: var(--oc-text-secondary);">这两项为可选增强项，仅在开启时写入配置文件。</p>
+                </div>
+                <span class="rounded-full border px-3 py-1 text-xs" style="border-color: color-mix(in srgb, var(--oc-accent) 14%, var(--oc-card-border)); color: var(--oc-accent); background: color-mix(in srgb, var(--oc-accent-soft) 60%, transparent);">可选项</span>
+              </div>
+
+              <div class="mt-4 space-y-3">
+                <div class="oc-quick-toggle-card rounded-[12px] border p-4">
+                  <div class="flex items-start justify-between gap-4">
+                    <div class="min-w-0 flex-1">
+                      <div class="flex flex-wrap items-center gap-2">
+                        <p class="text-sm font-medium" style="color: var(--oc-text-primary);">浏览器默认配置</p>
+                        <span class="oc-quick-toggle-state text-[11px]" :class="{ 'is-on': browserDefaultProfileEnabled }">
+                          {{ browserDefaultProfileEnabled ? '已启用' : '默认' }}
+                        </span>
+                      </div>
+                      <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-muted);">
+                        自动写入浏览器默认 Profile，便于后续调试与隔离使用。
+                      </p>
+                    </div>
+                    <div class="flex shrink-0 items-center">
+                      <button
+                        type="button"
+                        aria-label="toggle-quick-setup-browser-default-profile"
+                        :aria-checked="browserDefaultProfileEnabled"
+                        class="oc-quick-toggle"
+                        :class="{ 'is-on': browserDefaultProfileEnabled }"
+                        :disabled="busy"
+                        @click="browserDefaultProfileEnabled = !browserDefaultProfileEnabled"
+                      >
+                        <span class="oc-quick-toggle-thumb" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="oc-quick-toggle-card rounded-[12px] border p-4">
+                  <div class="flex items-start justify-between gap-4">
+                    <div class="min-w-0 flex-1">
+                      <div class="flex flex-wrap items-center gap-2">
+                        <p class="text-sm font-medium" style="color: var(--oc-text-primary);">完整工具能力</p>
+                        <span class="oc-quick-toggle-state text-[11px]" :class="{ 'is-on': toolsFullProfileEnabled }">
+                          {{ toolsFullProfileEnabled ? '已启用' : '默认' }}
+                        </span>
+                      </div>
+                      <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-muted);">
+                        写入完整工具配置，便于后续使用浏览器、自动化与调试能力。
+                      </p>
+                    </div>
+                    <div class="flex shrink-0 items-center">
+                      <button
+                        type="button"
+                        aria-label="toggle-quick-setup-tools-full-profile"
+                        :aria-checked="toolsFullProfileEnabled"
+                        class="oc-quick-toggle"
+                        :class="{ 'is-on': toolsFullProfileEnabled }"
+                        :disabled="busy"
+                        @click="toolsFullProfileEnabled = !toolsFullProfileEnabled"
+                      >
+                        <span class="oc-quick-toggle-thumb" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -770,6 +932,10 @@ onMounted(async () => {
               <RefreshCw class="h-4 w-4" />
               获取模型
             </Button>
+            <Button v-if="currentStep.id === 'gateway'" variant="outline" :disabled="busy" @click="openManualOnboard">
+              <ShieldCheck class="h-4 w-4" />
+              手动配置
+            </Button>
           </div>
         </div>
       </section>
@@ -777,4 +943,91 @@ onMounted(async () => {
   </div>
 </template>
 
+<style scoped>
+.oc-quick-setup-sidebar {
+  background:
+    radial-gradient(520px 280px at 0% 0%, color-mix(in srgb, var(--oc-accent-soft) 36%, transparent), transparent 72%),
+    linear-gradient(180deg, color-mix(in srgb, var(--oc-card) 98%, var(--oc-accent-soft) 2%), var(--oc-card));
+}
 
+.oc-quick-setup-main {
+  background:
+    radial-gradient(680px 300px at 100% 0%, color-mix(in srgb, var(--oc-accent-soft) 28%, transparent), transparent 68%),
+    linear-gradient(180deg, color-mix(in srgb, var(--oc-card) 99%, var(--oc-accent-soft) 1%), var(--oc-card));
+}
+
+.oc-quick-setup-hero {
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--oc-accent-soft) 22%, var(--oc-card) 78%), var(--oc-card));
+  box-shadow: 0 8px 18px color-mix(in srgb, var(--oc-accent) 4%, transparent);
+}
+
+.oc-quick-setup-step:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 18px color-mix(in srgb, var(--oc-accent) 4%, transparent);
+}
+
+.oc-quick-toggle-card {
+  border-color: var(--oc-card-border);
+  background: color-mix(in srgb, var(--oc-card) 88%, transparent);
+}
+
+.oc-quick-toggle-state {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 9999px;
+  border: 1px solid var(--oc-card-border);
+  padding: 2px 8px;
+  color: var(--oc-text-muted);
+  background: color-mix(in srgb, var(--oc-card) 92%, transparent);
+}
+
+.oc-quick-toggle-state.is-on {
+  border-color: color-mix(in srgb, var(--oc-accent) 16%, var(--oc-card-border));
+  color: var(--oc-accent);
+  background: color-mix(in srgb, var(--oc-accent-soft) 75%, transparent);
+}
+
+.oc-quick-toggle {
+  position: relative;
+  display: inline-flex;
+  height: 26px;
+  width: 46px;
+  flex-shrink: 0;
+  align-items: center;
+  border-radius: 9999px;
+  border: 1px solid var(--oc-card-border);
+  background: color-mix(in srgb, var(--oc-card) 92%, transparent);
+  transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.oc-quick-toggle:hover {
+  border-color: color-mix(in srgb, var(--oc-accent) 12%, var(--oc-card-border));
+}
+
+.oc-quick-toggle.is-on {
+  border-color: color-mix(in srgb, var(--oc-accent) 20%, var(--oc-card-border));
+  background: color-mix(in srgb, var(--oc-accent-soft) 85%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--oc-accent) 10%, transparent);
+}
+
+.oc-quick-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.66;
+}
+
+.oc-quick-toggle-thumb {
+  height: 18px;
+  width: 18px;
+  margin-left: 3px;
+  border-radius: 9999px;
+  border: 1px solid color-mix(in srgb, var(--oc-card-border) 88%, white 12%);
+  background: var(--oc-card);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
+  transition: transform 160ms ease;
+}
+
+.oc-quick-toggle.is-on .oc-quick-toggle-thumb {
+  transform: translateX(20px);
+}
+</style>
