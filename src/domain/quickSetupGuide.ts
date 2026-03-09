@@ -8,7 +8,7 @@ export type QuickSetupProviderId =
   | 'tencent-coding'
   | 'deepseek'
   | 'dashscope'
-  | 'hunyuan'
+  | 'siliconflow'
   | 'custom'
 
 export interface QuickSetupStepMeta {
@@ -24,6 +24,7 @@ export interface QuickSetupProviderPreset {
   description: string
   baseUrl: string
   isCustom?: boolean
+  skipModelFetch?: boolean
   suggestedModels: Array<{ id: string; name: string }>
   providerModels: ModelConfig[]
 }
@@ -48,6 +49,7 @@ export interface QuickSetupModelOption {
 }
 
 export interface QuickSetupModelOptionsInput {
+  presetModels?: Array<{ id: string; name?: string }>
   fetchedModels: string[]
   modelQuery: string
 }
@@ -119,8 +121,8 @@ const BAILIAN_MODELS: ModelConfig[] = [
     reasoning: false,
     input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 204_800,
-    maxTokens: 131_072,
+    contextWindow: 196_608,
+    maxTokens: 32_768,
   },
   {
     id: 'glm-5',
@@ -153,40 +155,49 @@ const BAILIAN_MODELS: ModelConfig[] = [
 
 const LKEAP_MODELS: ModelConfig[] = [
   {
+    id: 'tc-code-latest',
+    name: 'Auto',
+    reasoning: false,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 196_608,
+    maxTokens: 32_768,
+  },
+  {
     id: 'hunyuan-2.0-instruct',
     name: 'Tencent HY 2.0 Instruct',
     reasoning: false,
     input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 256_000,
-    maxTokens: 16_384,
+    contextWindow: 128_000,
+    maxTokens: 16_000,
   },
   {
     id: 'hunyuan-2.0-thinking',
     name: 'Tencent HY 2.0 Think',
-    reasoning: true,
+    reasoning: false,
     input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 256_000,
-    maxTokens: 16_384,
+    contextWindow: 128_000,
+    maxTokens: 32_000,
   },
   {
     id: 'hunyuan-t1',
     name: 'Hunyuan-T1',
-    reasoning: true,
-    input: ['text'],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 256_000,
-    maxTokens: 16_384,
-  },
-  {
-    id: 'hunyuan-turbos',
-    name: 'Hunyuan-TurboS',
     reasoning: false,
     input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 256_000,
-    maxTokens: 16_384,
+    contextWindow: 64_000,
+    maxTokens: 32_000,
+  },
+  {
+    id: 'hunyuan-turbos',
+    name: 'hunyuan-turbos',
+    reasoning: false,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 32_000,
+    maxTokens: 16_000,
   },
   {
     id: 'minimax-m2.5',
@@ -194,28 +205,34 @@ const LKEAP_MODELS: ModelConfig[] = [
     reasoning: false,
     input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 204_800,
-    maxTokens: 131_072,
+    contextWindow: 196_608,
+    maxTokens: 32_768,
   },
   {
     id: 'kimi-k2.5',
     name: 'Kimi-K2.5',
     reasoning: false,
-    input: ['text', 'image'],
+    input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 262_144,
     maxTokens: 32_768,
   },
   {
     id: 'glm-5',
-    name: 'glm-5',
+    name: 'GLM-5',
     reasoning: false,
     input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 202_752,
-    maxTokens: 8_192,
+    maxTokens: 16_384,
   },
 ]
+
+const toSuggestedModels = (models: ModelConfig[]) =>
+  models.map((model) => ({
+    id: model.id,
+    name: model.name || model.id,
+  }))
 
 const cloneConfig = (config: OpenClawConfig): OpenClawConfig =>
   JSON.parse(JSON.stringify(config ?? {})) as OpenClawConfig
@@ -242,7 +259,7 @@ export const QUICK_SETUP_STEPS: QuickSetupStepMeta[] = [
   {
     id: 'model',
     title: '配置大模型',
-    subtitle: '选择服务商、填写 Key，并确认一个主模型。',
+    subtitle: '选择服务商、填写 API Key，并确认一个主模型。',
   },
   {
     id: 'channel',
@@ -252,7 +269,7 @@ export const QUICK_SETUP_STEPS: QuickSetupStepMeta[] = [
   {
     id: 'gateway',
     title: '安装并启动网关',
-    subtitle: '按当前系统完成安装并等待网关就绪。',
+    subtitle: '按当前系统完成安装，并等待网关就绪。',
   },
 ]
 
@@ -263,11 +280,8 @@ export const QUICK_SETUP_PROVIDER_PRESETS: QuickSetupProviderPreset[] = [
     displayName: '阿里云 Coding',
     description: '阿里云 Coding 兼容 OpenAI Completions。',
     baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
-    suggestedModels: [
-      { id: 'qwen3.5-plus', name: 'qwen3.5-plus' },
-      { id: 'qwen3-coder-plus', name: 'qwen3-coder-plus' },
-      { id: 'qwen3-max-2026-01-23', name: 'qwen3-max-2026-01-23' },
-    ],
+    skipModelFetch: true,
+    suggestedModels: toSuggestedModels(BAILIAN_MODELS),
     providerModels: BAILIAN_MODELS,
   },
   {
@@ -276,15 +290,8 @@ export const QUICK_SETUP_PROVIDER_PRESETS: QuickSetupProviderPreset[] = [
     displayName: '腾讯云 Coding',
     description: '腾讯云 Coding 兼容 OpenAI Completions。',
     baseUrl: 'https://api.lkeap.cloud.tencent.com/coding/v3',
-    suggestedModels: [
-      { id: 'hunyuan-2.0-instruct', name: 'Tencent HY 2.0 Instruct' },
-      { id: 'hunyuan-2.0-thinking', name: 'Tencent HY 2.0 Think' },
-      { id: 'hunyuan-t1', name: 'Hunyuan-T1' },
-      { id: 'hunyuan-turbos', name: 'Hunyuan-TurboS' },
-      { id: 'minimax-m2.5', name: 'MiniMax-M2.5' },
-      { id: 'kimi-k2.5', name: 'Kimi-K2.5' },
-      { id: 'glm-5', name: 'GLM-5' },
-    ],
+    skipModelFetch: true,
+    suggestedModels: toSuggestedModels(LKEAP_MODELS),
     providerModels: LKEAP_MODELS,
   },
   {
@@ -318,19 +325,13 @@ export const QUICK_SETUP_PROVIDER_PRESETS: QuickSetupProviderPreset[] = [
     ],
   },
   {
-    id: 'hunyuan',
-    name: 'hunyuan',
-    displayName: '腾讯云混元',
-    description: '腾讯云混元官方兼容接口。',
-    baseUrl: 'https://api.hunyuan.cloud.tencent.com/v1',
-    suggestedModels: [
-      { id: 'hunyuan-turbos-latest', name: 'Hunyuan Turbo S' },
-      { id: 'hunyuan-t1-latest', name: 'Hunyuan T1' },
-    ],
-    providerModels: [
-      { id: 'hunyuan-turbos-latest', name: 'Hunyuan Turbo S' },
-      { id: 'hunyuan-t1-latest', name: 'Hunyuan T1' },
-    ],
+    id: 'siliconflow',
+    name: 'siliconflow',
+    displayName: '硅基流动',
+    description: '硅基流动兼容 OpenAI Completions。',
+    baseUrl: 'https://api.siliconflow.cn/v1',
+    suggestedModels: [],
+    providerModels: [],
   },
   {
     id: 'custom',
@@ -406,6 +407,7 @@ export const createQuickSetupCustomProviderPreset = ({
 })
 
 export const buildQuickSetupModelOptions = ({
+  presetModels = [],
   fetchedModels,
   modelQuery,
 }: QuickSetupModelOptionsInput): QuickSetupModelOption[] => {
@@ -419,6 +421,15 @@ export const buildQuickSetupModelOptions = ({
     })
   }
 
+  for (const model of presetModels) {
+    const presetModelId = model.id.trim()
+    if (!presetModelId || unique.has(presetModelId)) continue
+    unique.set(presetModelId, {
+      id: presetModelId,
+      name: model.name?.trim() || presetModelId,
+    })
+  }
+
   for (const modelId of fetchedModels) {
     const trimmedModelId = modelId.trim()
     if (!trimmedModelId || unique.has(trimmedModelId)) continue
@@ -429,6 +440,19 @@ export const buildQuickSetupModelOptions = ({
   }
 
   return Array.from(unique.values())
+}
+
+export const filterQuickSetupModelOptions = (
+  options: QuickSetupModelOption[],
+  query: string
+): QuickSetupModelOption[] => {
+  const normalizedQuery = query.trim().toLowerCase()
+  if (!normalizedQuery) return options
+
+  return options.filter((option) =>
+    option.id.toLowerCase().includes(normalizedQuery) ||
+    option.name.toLowerCase().includes(normalizedQuery)
+  )
 }
 
 export const applyQuickSetupModelPreset = (

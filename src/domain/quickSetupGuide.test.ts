@@ -10,6 +10,7 @@ import {
   clearQuickSetupManagedChannels,
   canSkipQuickSetupStep,
   createQuickSetupCustomProviderPreset,
+  filterQuickSetupModelOptions,
   findProviderPreset,
   getGatewayInstallPlan,
   sanitizeQuickSetupChannelConfig,
@@ -106,6 +107,7 @@ describe('provider presets', () => {
     expect(preset).toBeTruthy()
 
     expect(preset?.suggestedModels.map((model) => model.id)).toEqual([
+      'tc-code-latest',
       'hunyuan-2.0-instruct',
       'hunyuan-2.0-thinking',
       'hunyuan-t1',
@@ -116,6 +118,7 @@ describe('provider presets', () => {
     ])
 
     expect(preset?.providerModels.map((model) => model.id)).toEqual([
+      'tc-code-latest',
       'hunyuan-2.0-instruct',
       'hunyuan-2.0-thinking',
       'hunyuan-t1',
@@ -126,15 +129,21 @@ describe('provider presets', () => {
     ])
   })
 
-  it('keeps preset providers ahead of the custom provider entry', () => {
+  it('keeps preset providers ahead of the custom provider entry and replaces hunyuan with siliconflow', () => {
     expect(QUICK_SETUP_PROVIDER_PRESETS.map((preset) => preset.id)).toEqual([
       'dashscope-coding',
       'tencent-coding',
       'deepseek',
       'dashscope',
-      'hunyuan',
+      'siliconflow',
       'custom',
     ])
+
+    expect(findProviderPreset('siliconflow')).toMatchObject({
+      name: 'siliconflow',
+      baseUrl: 'https://api.siliconflow.cn/v1',
+    })
+    expect(findProviderPreset('hunyuan')).toBeUndefined()
   })
 
   it('builds a custom provider preset for the simplified quick setup flow', () => {
@@ -162,6 +171,7 @@ describe('provider presets', () => {
   it('keeps the model dropdown empty until remote models arrive, while still allowing a typed model id to be saved', () => {
     expect(
       buildQuickSetupModelOptions({
+        presetModels: [],
         fetchedModels: [],
         modelQuery: '',
       })
@@ -169,6 +179,7 @@ describe('provider presets', () => {
 
     expect(
       buildQuickSetupModelOptions({
+        presetModels: [],
         fetchedModels: [],
         modelQuery: 'openai/gpt-4.1',
       })
@@ -183,6 +194,7 @@ describe('provider presets', () => {
   it('deduplicates fetched models and keeps the typed query visible at the top when it is not in the fetched list', () => {
     expect(
       buildQuickSetupModelOptions({
+        presetModels: [],
         fetchedModels: ['qwen-plus', 'qwen-plus', 'qwen-max'],
         modelQuery: 'custom-main',
       })
@@ -190,6 +202,120 @@ describe('provider presets', () => {
       { id: 'custom-main', name: 'custom-main' },
       { id: 'qwen-plus', name: 'qwen-plus' },
       { id: 'qwen-max', name: 'qwen-max' },
+    ])
+  })
+
+  it('includes preset catalog models before fetched models so coding plans do not depend on remote model requests', () => {
+    expect(
+      buildQuickSetupModelOptions({
+        presetModels: [
+          { id: 'qwen3.5-plus', name: 'qwen3.5-plus' },
+          { id: 'qwen3-coder-plus', name: 'qwen3-coder-plus' },
+        ],
+        fetchedModels: ['qwen3-coder-plus', 'qwen3-max-2026-01-23'],
+        modelQuery: '',
+      })
+    ).toEqual([
+      { id: 'qwen3.5-plus', name: 'qwen3.5-plus' },
+      { id: 'qwen3-coder-plus', name: 'qwen3-coder-plus' },
+      { id: 'qwen3-max-2026-01-23', name: 'qwen3-max-2026-01-23' },
+    ])
+  })
+
+  it('filters model dropdown options like the config modal search dropdown', () => {
+    expect(
+      filterQuickSetupModelOptions(
+        [
+          { id: 'qwen3.5-plus', name: 'qwen3.5-plus' },
+          { id: 'qwen3-coder-plus', name: 'qwen3-coder-plus' },
+          { id: 'GLM-5', name: 'GLM-5' },
+        ],
+        'coder'
+      )
+    ).toEqual([
+      { id: 'qwen3-coder-plus', name: 'qwen3-coder-plus' },
+    ])
+
+    expect(
+      filterQuickSetupModelOptions(
+        [
+          { id: 'qwen3.5-plus', name: 'qwen3.5-plus' },
+          { id: 'GLM-5', name: 'GLM-5' },
+        ],
+        'glm'
+      )
+    ).toEqual([
+      { id: 'GLM-5', name: 'GLM-5' },
+    ])
+  })
+
+  it('keeps the documented aliyun coding catalog complete', () => {
+    const preset = findProviderPreset('dashscope-coding')
+    expect(preset).toBeTruthy()
+
+    expect(preset?.providerModels.map((model) => ({
+      id: model.id,
+      name: model.name,
+      input: model.input,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+    }))).toEqual([
+      {
+        id: 'qwen3.5-plus',
+        name: 'qwen3.5-plus',
+        input: ['text', 'image'],
+        contextWindow: 1_000_000,
+        maxTokens: 65_536,
+      },
+      {
+        id: 'qwen3-max-2026-01-23',
+        name: 'qwen3-max-2026-01-23',
+        input: ['text'],
+        contextWindow: 262_144,
+        maxTokens: 65_536,
+      },
+      {
+        id: 'qwen3-coder-next',
+        name: 'qwen3-coder-next',
+        input: ['text'],
+        contextWindow: 262_144,
+        maxTokens: 65_536,
+      },
+      {
+        id: 'qwen3-coder-plus',
+        name: 'qwen3-coder-plus',
+        input: ['text'],
+        contextWindow: 1_000_000,
+        maxTokens: 65_536,
+      },
+      {
+        id: 'MiniMax-M2.5',
+        name: 'MiniMax-M2.5',
+        input: ['text'],
+        contextWindow: 196_608,
+        maxTokens: 32_768,
+      },
+      {
+        id: 'glm-5',
+        name: 'glm-5',
+        input: ['text'],
+        contextWindow: 202_752,
+        maxTokens: 16_384,
+      },
+      {
+        id: 'glm-4.7',
+        name: 'glm-4.7',
+        input: ['text'],
+        contextWindow: 202_752,
+        maxTokens: 16_384,
+      },
+      {
+        id: 'kimi-k2.5',
+        name: 'kimi-k2.5',
+        input: ['text', 'image'],
+        contextWindow: 262_144,
+        maxTokens: 32_768,
+      },
     ])
   })
 })
