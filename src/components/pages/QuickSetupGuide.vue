@@ -7,7 +7,6 @@ import {
   ChevronLeft,
   Loader2,
   MessageSquareMore,
-  RefreshCw,
   Rocket,
   ShieldCheck,
   Sparkles,
@@ -21,6 +20,7 @@ import { formatGatewayInstallError, isAdminRequiredGatewayInstallError } from '.
 import {
   applyQuickSetupGatewayOptions,
   applyQuickSetupModelPreset,
+  buildQuickSetupModelOptions,
   clearQuickSetupManagedChannels,
   createQuickSetupCustomProviderPreset,
   QUICK_SETUP_CHANNEL_PRESETS,
@@ -29,6 +29,7 @@ import {
   canSkipQuickSetupStep,
   findProviderPreset,
   sanitizeQuickSetupChannelConfig,
+  type QuickSetupModelOption,
   type QuickSetupChannelId,
   type QuickSetupProviderId,
   type QuickSetupStepId,
@@ -42,6 +43,7 @@ import {
   shouldPersistQuickSetupSession,
   type QuickSetupSessionStatus,
 } from '../../domain/quickSetupSession'
+import { mergeFeishuChannelConfig } from '../../domain/feishuPlugin'
 import { resolveDingtalkChannelNode } from '../../domain/dingtalkPlugin'
 import { getChannelConfigKey, isChannelPluginInstalled, type ChannelPluginStatus } from '../../domain/channelPluginCatalog'
 import type { ConfigFileInfo, ModelSelectionInfo, OpenClawConfig, ProviderInfo } from '../../types/config'
@@ -56,11 +58,6 @@ const emit = defineEmits<{
   complete: []
   close: []
 }>()
-
-interface ModelOption {
-  id: string
-  name: string
-}
 
 const stepIndex = ref(0)
 const busy = ref(false)
@@ -89,6 +86,7 @@ const customProviderName = ref('')
 const customProviderBaseUrl = ref('')
 const fetchedModels = ref<string[]>([])
 const loadingModels = ref(false)
+const modelOptionsRequestKey = ref('')
 
 const selectedChannelId = ref<QuickSetupChannelId>('feishu')
 const channelIdValue = ref('')
@@ -104,9 +102,6 @@ const currentStep = computed(() => QUICK_SETUP_STEPS[stepIndex.value])
 const canRelaunchAsAdmin = computed(() => isAdminRequiredGatewayInstallError(errorMessage.value))
 const currentProviderPreset = computed(() => findProviderPreset(selectedProviderId.value)!)
 const isCustomProvider = computed(() => currentProviderPreset.value.isCustom === true)
-const resolvedProviderName = computed(() =>
-  isCustomProvider.value ? customProviderName.value.trim() : currentProviderPreset.value.name
-)
 const resolvedProviderBaseUrl = computed(() =>
   isCustomProvider.value ? customProviderBaseUrl.value.trim() : currentProviderPreset.value.baseUrl
 )
@@ -125,32 +120,28 @@ const hasReadyPrimaryModel = computed(() => {
 const extensionInstalled = computed(() => {
   return isChannelPluginInstalled(channelExtensionStatus.value, selectedChannelId.value)
 })
-const modelOptions = computed<ModelOption[]>(() => {
-  const unique = new Map<string, ModelOption>()
-  for (const item of currentProviderPreset.value.suggestedModels) {
-    unique.set(item.id, item)
-  }
-  for (const item of fetchedModels.value) {
-    if (!unique.has(item)) {
-      unique.set(item, { id: item, name: item })
-    }
-  }
-  return Array.from(unique.values())
+const modelOptions = computed<QuickSetupModelOption[]>(() =>
+  buildQuickSetupModelOptions({
+    fetchedModels: fetchedModels.value,
+    modelQuery: modelQuery.value,
+  })
+)
+const hasFetchedModelOptions = computed(() => fetchedModels.value.some((item) => item.trim().length > 0))
+const modelInputPlaceholder = computed(() => {
+  const suggestedId = currentProviderPreset.value.suggestedModels[0]?.id
+  return suggestedId ? `输入模型 ID，例如 ${suggestedId}` : '输入模型 ID，例如 gpt-4.1'
 })
-const filteredModelOptions = computed(() => {
-  const query = modelQuery.value.trim().toLowerCase()
-  if (!query) return modelOptions.value
-  return modelOptions.value.filter((item) => item.id.toLowerCase().includes(query) || item.name.toLowerCase().includes(query))
+const currentModelOptionsRequestKey = computed(() => {
+  const apiKey = providerApiKey.value.trim()
+  const baseUrl = resolvedProviderBaseUrl.value.trim()
+  if (!apiKey || !baseUrl) return ''
+  return `${selectedProviderId.value}::${baseUrl}::${apiKey}`
 })
 const primaryButtonLabel = computed(() => {
   if (busy.value) return busyMessage.value || '处理中...'
   if (currentStep.value.id === 'model') return '保存模型并下一步'
   if (currentStep.value.id === 'channel') return '保存渠道并下一步'
   return '安装网关并进入工作台'
-})
-const currentProviderApiKey = computed(() => {
-  const providerName = resolvedProviderName.value
-  return currentConfig.value?.models?.providers?.[providerName]?.apiKey || ''
 })
 const primaryModelPath = computed(() => modelSelection.value.primary || '')
 const maskSecret = (value: string) => {
@@ -322,7 +313,7 @@ const hydrateDraftsFromConfig = () => {
       .find((item) => item && (item.name === providerName || item.baseUrl === providerConfig?.baseUrl))
     if (preset) {
       selectedProviderId.value = preset.id
-      modelQuery.value = modelId || currentProviderPreset.value.suggestedModels[0]?.id || ''
+      modelQuery.value = modelId || ''
       modelSelectionMode.value = 'auto'
       customProviderName.value = ''
       customProviderBaseUrl.value = ''
@@ -333,8 +324,6 @@ const hydrateDraftsFromConfig = () => {
       customProviderBaseUrl.value = providerConfig?.baseUrl || ''
     }
     markStepSaved('model')
-  } else if (!modelQuery.value) {
-    modelQuery.value = currentProviderPreset.value.suggestedModels[0]?.id || ''
   }
 
   const channels = asRecord(currentConfig.value.channels)
@@ -396,30 +385,41 @@ const ensureDefaultConfigReady = async () => {
   await refreshChannelExtensionStatus()
 }
 
-const refreshModels = async () => {
+const refreshModels = async ({ silent = false }: { silent?: boolean } = {}) => {
   const apiKey = providerApiKey.value.trim()
   if (!apiKey) {
-    infoMessage.value = '填写 API Key 后可自动拉取模型列表，也可以直接手动填写模型 ID。'
+    fetchedModels.value = []
+    if (!silent) infoMessage.value = '填写 API Key 后可自动拉取模型列表，也可以直接手动填写模型 ID。'
     return
   }
   const baseUrl = resolvedProviderBaseUrl.value
   if (!baseUrl) {
-    infoMessage.value = '请先填写服务商 Base URL，再尝试自动拉取模型列表。'
+    fetchedModels.value = []
+    if (!silent) infoMessage.value = '请先填写服务商 Base URL，再尝试自动拉取模型列表。'
     return
   }
   loadingModels.value = true
   errorMessage.value = ''
-  infoMessage.value = ''
+  if (!silent) infoMessage.value = ''
   try {
     fetchedModels.value = await invoke<string[]>('fetch_provider_models', {
       baseUrl,
       apiKey,
     })
+    modelOptionsRequestKey.value = currentModelOptionsRequestKey.value
   } catch (error) {
-    infoMessage.value = `模型列表暂时没有自动拉取到：${error}。你可以继续手动填写模型 ID。`
+    fetchedModels.value = []
+    modelOptionsRequestKey.value = currentModelOptionsRequestKey.value
+    if (!silent) infoMessage.value = `模型列表暂时没有自动拉取到：${error}。你可以继续手动填写模型 ID。`
   } finally {
     loadingModels.value = false
   }
+}
+
+const ensureModelOptionsLoaded = async () => {
+  const requestKey = currentModelOptionsRequestKey.value
+  if (!requestKey || loadingModels.value || modelOptionsRequestKey.value === requestKey) return
+  await refreshModels({ silent: true })
 }
 
 const saveModelStep = async () => {
@@ -489,11 +489,14 @@ const saveChannelStep = async () => {
       const appSecret = channelSecretValue.value.trim()
       if (!appId || !appSecret) throw new Error('请填写完整的飞书 App ID 与 App Secret')
       await ensureSelectedChannelExtension()
-      await invoke<string>('set_feishu_channel_config', {
+      mergeFeishuChannelConfig(currentConfig.value as Record<string, unknown>, {
         appId,
         appSecret,
         enabled: true,
+        domain: 'feishu',
+        connectionMode: 'websocket',
       })
+      await saveConfigToDisk()
     } else if (selectedChannelId.value === 'dingtalk') {
       const clientId = channelIdValue.value.trim()
       const clientSecret = channelSecretValue.value.trim()
@@ -639,13 +642,20 @@ const handlePrimaryAction = async () => {
 
 watch(selectedProviderId, () => {
   fetchedModels.value = []
+  modelOptionsRequestKey.value = ''
   const providerName = isCustomProvider.value ? customProviderName.value.trim() : currentProviderPreset.value.name
   providerApiKey.value = currentConfig.value?.models?.providers?.[providerName]?.apiKey || ''
   if (isCustomProvider.value) {
     modelSelectionMode.value = 'manual'
   } else {
-    modelQuery.value = currentProviderPreset.value.suggestedModels[0]?.id || modelQuery.value
+    modelSelectionMode.value = 'auto'
   }
+})
+
+watch(currentModelOptionsRequestKey, (nextKey, previousKey) => {
+  if (nextKey === previousKey) return
+  fetchedModels.value = []
+  modelOptionsRequestKey.value = ''
 })
 
 watch(selectedChannelId, () => {
@@ -738,15 +748,14 @@ onMounted(async () => {
         </div>
       </aside>
 
-      <section class="oc-panel oc-quick-setup-main flex min-h-0 flex-col p-5">
-        <div class="flex items-start justify-between gap-4 border-b pb-4" style="border-color: var(--oc-divider-soft);">
+      <section class="oc-panel oc-quick-setup-main flex min-h-0 flex-col overflow-hidden p-5">
+        <div class="flex shrink-0 items-start justify-between gap-4 border-b pb-3" style="border-color: var(--oc-divider-soft);">
           <div>
             <div class="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.18em]" style="color: var(--oc-text-muted);">
               <component :is="currentStep.id === 'model' ? Bot : currentStep.id === 'channel' ? MessageSquareMore : Rocket" class="h-4 w-4" />
               Step {{ stepIndex + 1 }}
             </div>
-            <h2 class="mt-2 text-2xl font-semibold" style="color: var(--oc-text-primary);">{{ currentStep.title }}</h2>
-            <p class="mt-2 text-sm leading-6" style="color: var(--oc-text-secondary);">{{ currentStep.subtitle }}</p>
+            <h2 class="mt-1.5 text-[28px] font-semibold leading-tight" style="color: var(--oc-text-primary);">{{ currentStep.title }}</h2>
           </div>
           <Button v-if="showCloseAction" variant="outline" :disabled="busy || adminRelaunching" @click="closeQuickSetup">
             <X class="h-4 w-4" />
@@ -771,18 +780,16 @@ onMounted(async () => {
           <span v-else>{{ infoMessage }}</span>
         </div>
 
-        <div class="mt-5 flex min-h-0 flex-1 flex-col">
-          <div v-if="currentStep.id === 'model'" class="grid min-h-0 flex-1 gap-4 xl:grid-cols-[260px,minmax(0,1fr)]">
-            <div class="rounded-[18px] border p-4" style="border-color: color-mix(in srgb, var(--oc-accent) 10%, var(--oc-card-border)); background: var(--oc-card);">
+        <div class="mt-4 flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div v-if="currentStep.id === 'model'" class="grid min-h-0 flex-1 gap-4 overflow-hidden xl:grid-cols-[260px,minmax(0,1fr)]">
+            <div class="flex min-h-0 flex-col rounded-[18px] border p-4" style="border-color: color-mix(in srgb, var(--oc-accent) 10%, var(--oc-card-border)); background: var(--oc-card);">
               <div class="flex items-center justify-between gap-3">
                 <p class="text-sm font-medium" style="color: var(--oc-text-primary);">模型服务商</p>
                 <span class="rounded-full px-2 py-0.5 text-[11px]" style="background: color-mix(in srgb, var(--oc-accent-soft) 55%, transparent); color: var(--oc-accent);">
                   {{ QUICK_SETUP_PROVIDER_PRESETS.length }} 个选项
                 </span>
               </div>
-              <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-secondary);">左侧只负责选择服务商，右侧统一填写 API Key、模型方式和主模型。</p>
-
-              <div class="mt-4 max-h-[420px] space-y-2 overflow-y-auto pr-1">
+              <div class="mt-4 min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
                 <button
                   v-for="preset in QUICK_SETUP_PROVIDER_PRESETS"
                   :key="preset.id"
@@ -813,11 +820,7 @@ onMounted(async () => {
                   <div class="flex items-start justify-between gap-4">
                     <div>
                       <p class="text-sm font-semibold" style="color: var(--oc-text-primary);">{{ resolvedProviderDisplayName }}</p>
-                      <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-secondary);">{{ currentProviderPreset.description }}</p>
                     </div>
-                    <span class="rounded-full px-2 py-0.5 text-[11px]" style="background: color-mix(in srgb, var(--oc-card) 90%, transparent); color: var(--oc-text-muted);">
-                      {{ isCustomProvider ? '手动配置' : '预设服务商' }}
-                    </span>
                   </div>
                   <p v-if="!isCustomProvider" class="mt-3 text-xs leading-5" style="color: var(--oc-text-muted);">预设服务商的 Base URL 已内置，不需要在快速引导中额外填写。</p>
                 </div>
@@ -838,82 +841,42 @@ onMounted(async () => {
                 <div class="rounded-[18px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
                   <label class="mb-2 block text-sm font-medium" style="color: var(--oc-text-secondary);">API Key</label>
                   <Input v-model="providerApiKey" type="password" placeholder="输入服务商 API Key" autocomplete="off" />
-                  <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-muted);">
-                    同名服务商已存在时，这里会自动复用已保存的 Key：{{ currentProviderApiKey ? '已检测到已有 Key' : '未检测到' }}
-                  </p>
-                </div>
-
-                <div class="rounded-[18px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
-                  <label class="mb-2 block text-sm font-medium" style="color: var(--oc-text-secondary);">模型选择方式</label>
-                  <div class="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      class="oc-toolbar-btn h-9 px-3 text-sm"
-                      :style="modelSelectionMode === 'auto' ? { background: 'var(--oc-item-active)', borderColor: 'var(--oc-card-border-strong)', color: 'var(--oc-text-primary)' } : undefined"
-                      @click="modelSelectionMode = 'auto'"
-                    >
-                      自动请求
-                    </button>
-                    <button
-                      type="button"
-                      class="oc-toolbar-btn h-9 px-3 text-sm"
-                      :style="modelSelectionMode === 'manual' ? { background: 'var(--oc-item-active)', borderColor: 'var(--oc-card-border-strong)', color: 'var(--oc-text-primary)' } : undefined"
-                      @click="modelSelectionMode = 'manual'"
-                    >
-                      手动填写
-                    </button>
-                  </div>
-                  <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-muted);">
-                    自动请求失败不会中断快速引导，你仍然可以直接手动填写主模型 ID。
-                  </p>
                 </div>
 
                 <div class="rounded-[18px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
                   <div class="mb-2 flex items-center justify-between gap-3">
                     <label class="block text-sm font-medium" style="color: var(--oc-text-secondary);">主模型</label>
-                    <button
-                      v-if="modelSelectionMode === 'auto'"
-                      type="button"
-                      class="oc-toolbar-btn h-8 px-3 text-xs"
-                      :disabled="loadingModels || busy"
-                      @click="refreshModels"
-                    >
-                      <Loader2 v-if="loadingModels" class="h-3.5 w-3.5 animate-spin" />
-                      <RefreshCw v-else class="h-3.5 w-3.5" />
-                      获取模型
-                    </button>
+                    <span class="rounded-full px-2 py-0.5 text-[11px]" style="background: color-mix(in srgb, var(--oc-card) 88%, transparent); color: var(--oc-text-muted);">
+                      {{ loadingModels ? '正在读取列表' : hasFetchedModelOptions ? `${fetchedModels.length} 个候选` : '自动读取' }}
+                    </span>
                   </div>
                   <input
                     v-model="modelQuery"
                     class="oc-input w-full"
-                    :list="modelSelectionMode === 'auto' ? 'quick-setup-model-options' : undefined"
-                    :placeholder="modelSelectionMode === 'auto' ? '可搜索自动返回的模型，或直接输入模型 ID' : '直接输入主模型 ID，例如 gpt-4.1'"
+                    :list="hasFetchedModelOptions ? 'quick-setup-model-options' : undefined"
+                    :placeholder="modelInputPlaceholder"
                     autocomplete="off"
+                    @focus="() => { void ensureModelOptionsLoaded() }"
+                    @click="() => { void ensureModelOptionsLoaded() }"
                   />
-                  <datalist v-if="modelSelectionMode === 'auto'" id="quick-setup-model-options">
+                  <datalist v-if="hasFetchedModelOptions" id="quick-setup-model-options">
                     <option
-                      v-for="item in filteredModelOptions"
+                      v-for="item in modelOptions"
                       :key="item.id"
                       :value="item.id"
                       :label="item.name"
                     >{{ item.name }}</option>
                   </datalist>
-                  <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-muted);">
-                    {{ modelSelectionMode === 'auto'
-                      ? '自动模式会尝试读取服务商返回的模型列表；列表为空时仍可继续手动填写。'
-                      : '快速引导只保存一个主模型，不额外创建备用模型。' }}
-                  </p>
                 </div>
               </div>
             </div>
           </div>
 
-          <div v-else-if="currentStep.id === 'channel'" class="grid min-h-0 flex-1 gap-4 xl:grid-cols-[260px,minmax(0,1fr)]">
-            <div class="rounded-[18px] border p-4" style="border-color: color-mix(in srgb, var(--oc-accent) 10%, var(--oc-card-border)); background: var(--oc-card);">
+          <div v-else-if="currentStep.id === 'channel'" class="grid min-h-0 flex-1 gap-4 overflow-hidden xl:grid-cols-[260px,minmax(0,1fr)]">
+            <div class="flex min-h-0 flex-col rounded-[18px] border p-4" style="border-color: color-mix(in srgb, var(--oc-accent) 10%, var(--oc-card-border)); background: var(--oc-card);">
               <p class="text-sm font-medium" style="color: var(--oc-text-primary);">通信渠道</p>
-              <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-secondary);">按飞书、企业微信、QQ、钉钉的顺序排布，保存时会校验并自动安装对应插件。</p>
 
-              <div class="mt-4 max-h-[420px] space-y-2 overflow-y-auto pr-1">
+              <div class="mt-4 min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
                 <button
                   v-for="channel in QUICK_SETUP_CHANNEL_PRESETS"
                   :key="channel.id"
@@ -931,7 +894,6 @@ onMounted(async () => {
                       {{ isChannelPluginInstalled(channelExtensionStatus, channel.id) ? '已安装插件' : '待安装插件' }}
                     </span>
                   </div>
-                  <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-secondary);">{{ channel.description }}</p>
                 </button>
               </div>
             </div>
@@ -939,15 +901,7 @@ onMounted(async () => {
             <div class="min-h-0 overflow-y-auto pr-1">
               <div class="space-y-4">
                 <div class="rounded-[18px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
-                  <div class="flex items-start justify-between gap-4">
-                    <div>
-                      <p class="text-sm font-semibold" style="color: var(--oc-text-primary);">{{ currentChannelPreset.name }}</p>
-                      <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-secondary);">{{ currentChannelPreset.description }}</p>
-                    </div>
-                    <span class="rounded-full px-2 py-0.5 text-[11px]" style="background: color-mix(in srgb, var(--oc-card) 88%, transparent); color: var(--oc-text-muted);">
-                      {{ extensionInstalled ? '保存时直接写入配置' : '保存时自动安装插件' }}
-                    </span>
-                  </div>
+                  <p class="text-sm font-semibold" style="color: var(--oc-text-primary);">{{ currentChannelPreset.name }}</p>
                 </div>
 
                 <div class="rounded-[18px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
@@ -970,7 +924,6 @@ onMounted(async () => {
                 >
                   <label class="mb-2 block text-sm font-medium" style="color: var(--oc-text-secondary);">{{ currentChannelPreset.secretLabel }}</label>
                   <Input v-model="channelSecretValue" type="password" :placeholder="`输入${currentChannelPreset.secretLabel}`" autocomplete="off" />
-                  <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-muted);">快速引导只写入当前选中的一个通信渠道，其他快速引导渠道会被清理掉，避免网关启动时混入残留配置。</p>
                 </div>
               </div>
             </div>
@@ -1060,7 +1013,7 @@ onMounted(async () => {
           </div>
         </div>
 
-        <div class="mt-5 flex items-center justify-between gap-3 border-t pt-4" style="border-color: var(--oc-divider-soft);">
+        <div class="mt-4 flex shrink-0 items-center justify-between gap-3 border-t pt-3" style="border-color: var(--oc-divider-soft);">
           <Button variant="outline" :disabled="stepIndex === 0 || busy" @click="movePrev">
             <ChevronLeft class="h-4 w-4" />
             上一步
@@ -1073,10 +1026,6 @@ onMounted(async () => {
             <Button :disabled="busy || (currentStep.id === 'gateway' && !hasReadyPrimaryModel)" @click="handlePrimaryAction">
               <Loader2 v-if="busy" class="h-4 w-4 animate-spin" />
               <span v-else>{{ primaryButtonLabel }}</span>
-            </Button>
-            <Button v-if="currentStep.id === 'model'" variant="outline" :disabled="busy || loadingModels" @click="refreshModels">
-              <RefreshCw class="h-4 w-4" />
-              获取模型
             </Button>
             <Button v-if="currentStep.id === 'gateway'" variant="outline" :disabled="busy" @click="openManualOnboard">
               <ShieldCheck class="h-4 w-4" />
