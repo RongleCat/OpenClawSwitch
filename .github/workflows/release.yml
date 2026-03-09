@@ -19,11 +19,8 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            args: --target aarch64-apple-darwin
-            name: macOS-ARM64
-          - platform: macos-latest
-            args: --target x86_64-apple-darwin
-            name: macOS-x64
+            args: --target universal-apple-darwin
+            name: macOS-Universal
           - platform: windows-latest
             args: ""
             name: Windows-x64
@@ -48,21 +45,66 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Build Tauri App
-        uses: tauri-apps/tauri-action@v0
+      - name: Build Tauri App (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          chmod +x ./scripts/build-mac-universal.sh
+          npm run tauri:build:mac
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Tauri App (Windows)
+        if: matrix.platform == 'windows-latest'
+        run: npm run tauri build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Windows artifacts
+        if: matrix.platform == 'windows-latest'
+        uses: actions/upload-artifact@v4
         with:
-          tagName: v__VERSION__
-          releaseName: "OpenClawSwitch v__VERSION__"
-          releaseBody: |
+          name: windows-x64
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+
+      - name: Upload macOS artifacts
+        if: matrix.platform == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: |
+            src-tauri/target/universal-apple-darwin/release/bundle/*.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.dmg
+            artifacts/**/*.msi
+          body: |
             ## Download
 
             | Platform | File |
             |----------|------|
             | Windows | `.msi` installer |
-            | macOS (Apple Silicon) | `_aarch64.dmg` |
-            | macOS (Intel) | `_x64.dmg` |
+            | macOS (Universal) | `_universal.dmg` |
 
             > **Note**: The macOS app is signed with an ad-hoc certificate. On first launch, right-click the app and select "Open", or run:
             > ```bash
@@ -72,9 +114,4 @@ jobs:
             ## Changes
 
             See [README](https://github.com/RongleCat/OpenClawSwitch#readme) for usage instructions.
-          releaseDraft: true
-          prerelease: false
-          args: ${{ matrix.args }}
-          tauriScript: npm run tauri
-          macOSSign: ''
-          appCert: ''
+
