@@ -1417,7 +1417,7 @@ onUnmounted(() => {
               />
 
               <div v-else-if="activeNav === 'channels'" class="oc-page-root">
-                <MessageChannelsPage class="h-full min-h-0" :show-toast="showToast" />
+                <MessageChannelsPage class="h-full min-h-0" :show-toast="showToast" :system-os="currentSystemOs" />
               </div>
 
               <div v-else class="space-y-3">

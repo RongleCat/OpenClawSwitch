@@ -136,6 +136,8 @@ pub struct DoctorStatusEvent {
 #[serde(rename_all = "camelCase")]
 pub struct ChannelExtensionStatus {
     pub feishu_installed: bool,
+    pub wecom_installed: bool,
+    pub qq_installed: bool,
     pub dingtalk_installed: bool,
 }
 
@@ -744,21 +746,63 @@ fn get_extensions_root() -> Result<PathBuf, String> {
     Ok(openclaw_root.join("extensions"))
 }
 
-fn get_extension_meta(channel_id: &str) -> Result<(&'static str, &'static str), String> {
+fn get_extension_meta(channel_id: &str) -> Result<(&'static str, &'static str, &'static str), String> {
     match channel_id {
-        "feishu" => Ok(("@m1heng-clawd/feishu", "feishu")),
-        "dingtalk" => Ok(("@dingtalk-real-ai/dingtalk-connector", "dingtalk")),
+        "feishu" => Ok(("@larksuiteoapi/feishu-openclaw-plugin", "feishu", "@larksuiteoapi/feishu-openclaw-plugin")),
+        "wecom" => Ok(("@wecom/wecom-openclaw-plugin", "wecom-openclaw-plugin", "@wecom/wecom-openclaw-plugin")),
+        "qq" => Ok(("@sliverp/qqbot", "qqbot", "@sliverp/qqbot")),
+        "dingtalk" => Ok(("@dingtalk-real-ai/dingtalk-connector", "dingtalk", "@dingtalk-real-ai/dingtalk-connector")),
         _ => Err(format!("不支持的渠道扩展: {}", channel_id)),
     }
 }
 
-fn is_channel_extension_installed(target_dir_name: &str) -> bool {
+fn read_extension_package_name(package_json_path: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(package_json_path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    parsed.get("name")?.as_str().map(|value| value.to_string())
+}
+
+fn find_extension_dir_by_package_name(package_name: &str) -> Option<PathBuf> {
     let extensions_root = match get_extensions_root() {
         Ok(path) => path,
+        Err(_) => return None,
+    };
+
+    let entries = std::fs::read_dir(extensions_root).ok()?;
+    for entry in entries {
+        let entry = entry.ok()?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let package_json_path = path.join("package.json");
+        if !package_json_path.is_file() {
+            continue;
+        }
+
+        if read_extension_package_name(&package_json_path)
+            .map(|value| value == package_name)
+            .unwrap_or(false)
+        {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+fn is_channel_extension_installed(channel_id: &str) -> bool {
+    let (_, _, package_name) = match get_extension_meta(channel_id) {
+        Ok(meta) => meta,
         Err(_) => return false,
     };
 
-    let target_dir = extensions_root.join(target_dir_name);
+    let target_dir = match find_extension_dir_by_package_name(package_name) {
+        Some(path) => path,
+        None => return false,
+    };
+
     target_dir.exists()
         && target_dir.join("package.json").exists()
         && target_dir.join("node_modules").exists()
@@ -3504,6 +3548,8 @@ pub async fn uninstall_openclaw(app: AppHandle, remove_config_dir: bool) -> Resu
 pub async fn get_channel_extension_status() -> Result<ChannelExtensionStatus, String> {
     Ok(ChannelExtensionStatus {
         feishu_installed: is_channel_extension_installed("feishu"),
+        wecom_installed: is_channel_extension_installed("wecom"),
+        qq_installed: is_channel_extension_installed("qq"),
         dingtalk_installed: is_channel_extension_installed("dingtalk"),
     })
 }
@@ -3519,7 +3565,7 @@ pub async fn install_channel_extension(app: AppHandle, channel_id: String) -> Re
     }
 
     let install_result = (|| -> Result<String, String> {
-        let (npm_package, target_dir_name) = get_extension_meta(&channel_id)?;
+        let (npm_package, target_dir_name, _) = get_extension_meta(&channel_id)?;
         let npm = npm_executable();
         let extensions_root = get_extensions_root()?;
         std::fs::create_dir_all(&extensions_root).map_err(|e| format!("创建扩展目录失败: {}", e))?;
@@ -3653,7 +3699,7 @@ pub async fn install_channel_extension(app: AppHandle, channel_id: String) -> Re
             "success",
         );
 
-        if !is_channel_extension_installed(target_dir_name) {
+        if !is_channel_extension_installed(&channel_id) {
             let _ = std::fs::remove_dir_all(&temp_dir);
             return Err("安装完成校验失败，请重试".to_string());
         }

@@ -13,9 +13,11 @@ import {
 } from './messageChannelAccounts'
 
 describe('MANAGED_MESSAGE_CHANNEL_IDS', () => {
-  it('keeps only the five supported channels', () => {
+  it('keeps plugin-backed channels and classic channels in supported order', () => {
     expect(MANAGED_MESSAGE_CHANNEL_IDS).toEqual([
       'feishu',
+      'wecom',
+      'qq',
       'dingtalk',
       'telegram',
       'discord',
@@ -98,6 +100,19 @@ describe('isMessageChannelConfigured', () => {
         },
       })
     ).toBe(true)
+
+    expect(
+      isMessageChannelConfigured('wecom', {
+        botId: 'wecom-bot-id',
+        secret: 'wecom-secret',
+      })
+    ).toBe(true)
+
+    expect(
+      isMessageChannelConfigured('qq', {
+        token: '1903108956:test-qq-token',
+      })
+    ).toBe(true)
   })
 })
 
@@ -159,6 +174,8 @@ describe('saveMessageChannelAccountConfig', () => {
           accounts: {
             ops: {
               clientId: 'new',
+              showThinking: true,
+              mediaMaxMb: 20,
             },
           },
         },
@@ -203,6 +220,25 @@ describe('saveMessageChannelDefaultAccountConfig', () => {
               botToken: 'ops-token',
             },
           },
+        },
+      },
+    })
+  })
+
+  it('writes QQ default credentials into channels.qqbot instead of channels.qq', () => {
+    const root: Record<string, unknown> = { channels: {} }
+
+    saveMessageChannelDefaultAccountConfig(root, 'qq', {
+      enabled: true,
+      token: '1903108956:test-qq-token',
+      markdownSupport: false,
+    })
+
+    expect(root).toEqual({
+      channels: {
+        qqbot: {
+          enabled: true,
+          token: '1903108956:test-qq-token',
         },
       },
     })

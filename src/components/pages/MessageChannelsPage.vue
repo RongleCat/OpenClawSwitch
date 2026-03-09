@@ -57,9 +57,22 @@ import {
   shouldBlockMessageChannelConfigUntilInstall,
 } from '../../domain/messageChannelInstallGate'
 import { messageChannelInstallModalLayout } from '../../domain/messageChannelInstallModalLayout'
+import {
+  getChannelConfigKey,
+  isChannelPluginInstalled,
+  MESSAGE_CHANNEL_PRIMARY_ORDER,
+  PLUGIN_INSTALL_CHANNEL_IDS,
+  type ChannelPluginStatus,
+} from '../../domain/channelPluginCatalog'
+import {
+  createDebouncedGatewayRestartController,
+  resolveGatewayRestartCommand,
+} from '../../domain/gatewayRestart'
 import type { ConfigFileInfo, InstallLogEvent, OpenClawConfig } from '../../types/config'
 
 type ChannelId =
+  | 'wecom'
+  | 'qq'
   | 'telegram'
   | 'discord'
   | 'slack'
@@ -69,7 +82,7 @@ type ChannelId =
   | 'dingtalk'
 
 type ChannelConfigPanel = 'credentials' | 'access' | 'connection' | 'advanced'
-type ExtensionChannelId = 'feishu' | 'dingtalk'
+type ExtensionChannelId = 'feishu' | 'wecom' | 'qq' | 'dingtalk'
 type JsonRecord = Record<string, unknown>
 
 interface ChannelForm {
@@ -160,6 +173,22 @@ interface ChannelForm {
   feishuDynamicAgentDirTemplate: string
   feishuDynamicMaxAgents: string
 
+  wecomName: string
+  wecomDmPolicy: 'pairing' | 'allowlist' | 'open' | 'disabled'
+  wecomAllowFrom: string
+  wecomGroupPolicy: 'allowlist' | 'open' | 'disabled'
+  wecomGroupAllowFrom: string
+  wecomGroups: string
+  wecomWebsocketUrl: string
+  wecomSendThinkingMessage: boolean
+
+  qqName: string
+  qqDmPolicy: 'open' | 'pairing' | 'allowlist'
+  qqAllowFrom: string
+  qqSystemPrompt: string
+  qqImageServerBaseUrl: string
+  qqMarkdownSupport: boolean
+
   dingtalkDmPolicy: 'open' | 'pairing' | 'allowlist'
   dingtalkAllowFrom: string
   dingtalkGroupPolicy: 'open' | 'allowlist'
@@ -183,10 +212,7 @@ interface ChannelMeta {
   iconColor: string
 }
 
-interface ChannelExtensionStatus {
-  feishuInstalled: boolean
-  dingtalkInstalled: boolean
-}
+type ChannelExtensionStatus = ChannelPluginStatus
 
 interface ChannelExtensionInstallStateEvent {
   channelId: string
@@ -196,12 +222,15 @@ interface ChannelExtensionInstallStateEvent {
 const props = withDefaults(
   defineProps<{
     showToast: (type: 'success' | 'error', message: string) => void
+    systemOs: 'windows' | 'macos' | 'linux'
   }>(),
   {}
 )
 
 const channelList: ChannelMeta[] = [
   { id: 'feishu', name: '飞书', icon: MessageCircle, iconColor: 'var(--oc-accent)' },
+  { id: 'wecom', name: '企业微信', icon: MessageCircle, iconColor: 'var(--oc-success)' },
+  { id: 'qq', name: 'QQ', icon: Bell, iconColor: 'var(--oc-warning)' },
   { id: 'dingtalk', name: '钉钉', icon: Bell, iconColor: 'var(--oc-accent)' },
   { id: 'telegram', name: 'Telegram', icon: Send, iconColor: 'var(--oc-accent)' },
   { id: 'discord', name: 'Discord', icon: Hash, iconColor: 'var(--oc-warning)' },
@@ -209,6 +238,8 @@ const channelList: ChannelMeta[] = [
 ]
 
 const hints: Record<ChannelId, string> = {
+  wecom: '按企业微信插件配置 Bot ID、Secret、访问策略、群组白名单与连接参数。',
+  qq: '按 QQ Bot 插件配置 App ID、App Secret、私聊策略、系统提示词和 Markdown 能力。',
   telegram: '按官方配置填写 botToken、DM/群组策略、allowFrom 与 groups 白名单。',
   discord: '按官方配置填写 token、dm.policy、groupPolicy 与 guild/channel 白名单。',
   slack: '按官方配置填写 botToken、模式/端口/路径、访问策略、replyTo 与分块参数。',
@@ -225,6 +256,17 @@ const channelTabsMap: Record<ChannelId, Array<{ id: ChannelConfigPanel; label: s
     { id: 'advanced', label: '高级配置' }
   ],
   discord: [
+    { id: 'credentials', label: '凭据配置' },
+    { id: 'access', label: '访问策略' },
+    { id: 'advanced', label: '高级配置' }
+  ],
+  wecom: [
+    { id: 'credentials', label: '凭据配置' },
+    { id: 'access', label: '访问策略' },
+    { id: 'connection', label: '连接模式' },
+    { id: 'advanced', label: '高级配置' }
+  ],
+  qq: [
     { id: 'credentials', label: '凭据配置' },
     { id: 'access', label: '访问策略' },
     { id: 'advanced', label: '高级配置' }
@@ -350,6 +392,22 @@ const defaultForm = (): ChannelForm => ({
   feishuDynamicAgentDirTemplate: '',
   feishuDynamicMaxAgents: '',
 
+  wecomName: '',
+  wecomDmPolicy: 'pairing',
+  wecomAllowFrom: '',
+  wecomGroupPolicy: 'open',
+  wecomGroupAllowFrom: '',
+  wecomGroups: '',
+  wecomWebsocketUrl: '',
+  wecomSendThinkingMessage: true,
+
+  qqName: '',
+  qqDmPolicy: 'pairing',
+  qqAllowFrom: '',
+  qqSystemPrompt: '',
+  qqImageServerBaseUrl: '',
+  qqMarkdownSupport: true,
+
   dingtalkDmPolicy: 'open',
   dingtalkAllowFrom: '',
   dingtalkGroupPolicy: 'open',
@@ -366,14 +424,32 @@ const defaultForm = (): ChannelForm => ({
   dingtalkDebug: false
 })
 
+const parseQqCredentialsFromConfig = (node: JsonRecord | undefined) => {
+  if (!node) return { appId: '', clientSecret: '' }
+
+  const appId = asString(node.appId)
+  const clientSecret = asString(node.clientSecret)
+  if (appId || clientSecret) {
+    return { appId, clientSecret }
+  }
+
+  const token = asString(node.token)
+  if (!token) return { appId: '', clientSecret: '' }
+
+  const [legacyAppId, ...secretParts] = token.split(':')
+  return {
+    appId: legacyAppId?.trim() || '',
+    clientSecret: secretParts.join(':').trim(),
+  }
+}
+
 const channelIds: ChannelId[] = [
+  ...MESSAGE_CHANNEL_PRIMARY_ORDER,
   'telegram',
   'discord',
   'slack',
-  'feishu',
   'whatsapp',
   'imessage',
-  'dingtalk',
 ]
 
 interface AgentOption {
@@ -433,8 +509,11 @@ const revealSlackSigningSecret = ref(false)
 const selectedPanel = ref<ChannelConfigPanel>(channelTabsMap[selectedChannelId.value][0].id)
 const extensionStatus = ref<ChannelExtensionStatus>({
   feishuInstalled: false,
+  wecomInstalled: false,
+  qqInstalled: false,
   dingtalkInstalled: false
 })
+const gatewayRestartController = createDebouncedGatewayRestartController()
 const extensionStatusLoading = ref(false)
 const showInstallModal = ref(false)
 const installingExtension = ref(false)
@@ -636,10 +715,13 @@ const buildObjectKeysText = (value: unknown): string => {
 }
 
 const channelConfigKey = (channelId: ChannelId): string =>
-  channelId === 'dingtalk' ? DINGTALK_CHANNEL_KEY : channelId
+  channelId === 'dingtalk' ? DINGTALK_CHANNEL_KEY : getChannelConfigKey(channelId)
 
-const channelBindingKeys = (channelId: ChannelId): string[] =>
-  channelId === 'dingtalk' ? DINGTALK_CHANNEL_BINDING_KEYS : [channelId]
+const channelBindingKeys = (channelId: ChannelId): string[] => {
+  if (channelId === 'dingtalk') return DINGTALK_CHANNEL_BINDING_KEYS
+  const configKey = getChannelConfigKey(channelId)
+  return configKey === channelId ? [channelId] : [channelId, configKey]
+}
 
 const bindingChannelMatches = (channelId: ChannelId, rawChannel: unknown): boolean => {
   if (typeof rawChannel !== 'string') return false
@@ -855,6 +937,8 @@ const applyChannelConfigToAccount = (
     channelId === 'discord' ||
     channelId === 'slack' ||
     channelId === 'feishu' ||
+    channelId === 'wecom' ||
+    channelId === 'qq' ||
     channelId === 'dingtalk'
   ) {
     saveMessageChannelAccountConfig(
@@ -1010,6 +1094,10 @@ const submitAccount = async () => {
         ? applyDiscordConfig
         : channelId === 'slack'
           ? applySlackConfig
+          : channelId === 'wecom'
+            ? applyWecomConfig
+            : channelId === 'qq'
+              ? applyQqConfig
           : channelId === 'feishu'
             ? applyFeishuConfig
             : applyDingtalkConfig
@@ -1047,6 +1135,8 @@ const removeSelectedAccount = async () => {
         channelId === 'discord' ||
         channelId === 'slack' ||
         channelId === 'feishu' ||
+        channelId === 'wecom' ||
+        channelId === 'qq' ||
         channelId === 'dingtalk'
       ) {
         removeMessageChannelAccountConfig(mutable, channelId as ManagedMessageChannelId, accountId)
@@ -1066,13 +1156,11 @@ const isConfigured = (id: ChannelId) => {
 }
 
 const isExtensionChannel = (id: ChannelId): id is ExtensionChannelId =>
-  id === 'feishu' || id === 'dingtalk'
+  PLUGIN_INSTALL_CHANNEL_IDS.includes(id as ExtensionChannelId)
 
-const selectedExtensionInstalled = computed(() => {
-  if (selectedChannelId.value === 'feishu') return extensionStatus.value.feishuInstalled
-  if (selectedChannelId.value === 'dingtalk') return extensionStatus.value.dingtalkInstalled
-  return true
-})
+const selectedExtensionInstalled = computed(() =>
+  isChannelPluginInstalled(extensionStatus.value, selectedChannelId.value)
+)
 
 const selectedNeedsExtensionInstall = computed(() =>
   shouldBlockMessageChannelConfigUntilInstall({
@@ -1303,6 +1391,46 @@ const applyIMessageConfig = (mutable: JsonRecord, form: ChannelForm) => {
   setStringOrDelete(mutable, ['channels', 'imessage', 'chunkMode'], form.imessageChunkMode)
 }
 
+const applyWecomConfig = (mutable: JsonRecord, form: ChannelForm) => {
+  setPathValue(mutable, ['channels', 'wecom', 'enabled'], form.enabled)
+  setStringOrDelete(mutable, ['channels', 'wecom', 'botId'], form.token)
+  setStringOrDelete(mutable, ['channels', 'wecom', 'secret'], form.userId)
+  setStringOrDelete(mutable, ['channels', 'wecom', 'name'], form.wecomName)
+  setPathValue(mutable, ['channels', 'wecom', 'dmPolicy'], form.wecomDmPolicy)
+  setListOrDelete(mutable, ['channels', 'wecom', 'allowFrom'], form.wecomAllowFrom)
+  setPathValue(mutable, ['channels', 'wecom', 'groupPolicy'], form.wecomGroupPolicy)
+  setListOrDelete(mutable, ['channels', 'wecom', 'groupAllowFrom'], form.wecomGroupAllowFrom)
+  setStringOrDelete(mutable, ['channels', 'wecom', 'websocketUrl'], form.wecomWebsocketUrl)
+  setPathValue(mutable, ['channels', 'wecom', 'sendThinkingMessage'], form.wecomSendThinkingMessage)
+
+  const existingGroups = asRecord(getPathValue(mutable, ['channels', 'wecom', 'groups'])) || {}
+  const groupIds = parseListText(form.wecomGroups)
+  if (groupIds.length === 0) {
+    deletePathValue(mutable, ['channels', 'wecom', 'groups'])
+  } else {
+    const groups: JsonRecord = {}
+    for (const groupId of groupIds) {
+      const existing = asRecord(existingGroups[groupId])
+      groups[groupId] = existing ? { ...existing } : { enabled: true }
+    }
+    setPathValue(mutable, ['channels', 'wecom', 'groups'], groups)
+  }
+}
+
+const applyQqConfig = (mutable: JsonRecord, form: ChannelForm) => {
+  setPathValue(mutable, ['channels', 'qqbot', 'enabled'], form.enabled)
+  setStringOrDelete(mutable, ['channels', 'qqbot', 'appId'], form.token)
+  setStringOrDelete(mutable, ['channels', 'qqbot', 'clientSecret'], form.userId)
+  deletePathValue(mutable, ['channels', 'qqbot', 'token'])
+  deletePathValue(mutable, ['channels', 'qqbot', 'clientSecretFile'])
+  setStringOrDelete(mutable, ['channels', 'qqbot', 'name'], form.qqName)
+  setPathValue(mutable, ['channels', 'qqbot', 'dmPolicy'], form.qqDmPolicy)
+  setListOrDelete(mutable, ['channels', 'qqbot', 'allowFrom'], form.qqAllowFrom)
+  setStringOrDelete(mutable, ['channels', 'qqbot', 'systemPrompt'], form.qqSystemPrompt)
+  setStringOrDelete(mutable, ['channels', 'qqbot', 'imageServerBaseUrl'], form.qqImageServerBaseUrl)
+  setPathValue(mutable, ['channels', 'qqbot', 'markdownSupport'], form.qqMarkdownSupport)
+}
+
 const applyFeishuConfig = (mutable: JsonRecord, form: ChannelForm) => {
   setPathValue(mutable, ['channels', 'feishu', 'enabled'], form.enabled)
   setStringOrDelete(mutable, ['channels', 'feishu', 'appId'], form.token)
@@ -1405,6 +1533,8 @@ const syncChannelsFromConfig = async () => {
           channelId === 'discord' ||
           channelId === 'slack' ||
           channelId === 'feishu' ||
+          channelId === 'wecom' ||
+          channelId === 'qq' ||
           channelId === 'dingtalk'
             ? buildMessageChannelAccountLabel(
                 channelId as ManagedMessageChannelId,
@@ -1423,6 +1553,8 @@ const syncChannelsFromConfig = async () => {
         channelId === 'discord' ||
         channelId === 'slack' ||
         channelId === 'feishu' ||
+        channelId === 'wecom' ||
+        channelId === 'qq' ||
         channelId === 'dingtalk'
       ) {
         configuredByChannel.value[channelId] = isMessageChannelConfigured(
@@ -1603,6 +1735,53 @@ const syncChannelsFromConfig = async () => {
     forms.value.imessage.imessageTextChunkLimit = asString(readIMessage(['textChunkLimit']))
     forms.value.imessage.imessageChunkMode = asString(readIMessage(['chunkMode'])) || 'sentence'
 
+    const wecom = getChannelConfigNode(channelsRaw, 'wecom')
+    const readWecomAccount = (path: string[]) => readChannelValue(wecom, getSelectedAccountId('wecom'), path)
+    const readWecomShared = (path: string[]) => readSharedChannelValue(wecom, path)
+    forms.value.wecom.token = asString(readWecomAccount(['botId']))
+    forms.value.wecom.userId = asString(readWecomAccount(['secret']))
+    forms.value.wecom.wecomName = asString(readWecomAccount(['name']))
+    forms.value.wecom.wecomDmPolicy = enumOrDefault(
+      readWecomShared(['dmPolicy']),
+      ['pairing', 'allowlist', 'open', 'disabled'],
+      'pairing'
+    )
+    forms.value.wecom.wecomAllowFrom = listToText(readWecomShared(['allowFrom']))
+    forms.value.wecom.wecomGroupPolicy = enumOrDefault(
+      readWecomShared(['groupPolicy']),
+      ['allowlist', 'open', 'disabled'],
+      'open'
+    )
+    forms.value.wecom.wecomGroupAllowFrom = listToText(readWecomShared(['groupAllowFrom']))
+    forms.value.wecom.wecomGroups = buildObjectKeysText(readWecomShared(['groups']))
+    forms.value.wecom.wecomWebsocketUrl = asString(readWecomShared(['websocketUrl']))
+    forms.value.wecom.wecomSendThinkingMessage =
+      typeof readWecomShared(['sendThinkingMessage']) === 'boolean'
+        ? (readWecomShared(['sendThinkingMessage']) as boolean)
+        : true
+
+    const qq = getChannelConfigNode(channelsRaw, 'qq')
+    const readQqAccount = (path: string[]) => readChannelValue(qq, getSelectedAccountId('qq'), path)
+    const readQqShared = (path: string[]) => readSharedChannelValue(qq, path)
+    const qqCredentials = parseQqCredentialsFromConfig(
+      asRecord(readChannelValue(qq, getSelectedAccountId('qq'), [])) || asRecord(qq)
+    )
+    forms.value.qq.token = qqCredentials.appId
+    forms.value.qq.userId = qqCredentials.clientSecret
+    forms.value.qq.qqName = asString(readQqAccount(['name']))
+    forms.value.qq.qqDmPolicy = enumOrDefault(
+      readQqShared(['dmPolicy']),
+      ['open', 'pairing', 'allowlist'],
+      'pairing'
+    )
+    forms.value.qq.qqAllowFrom = listToText(readQqShared(['allowFrom']))
+    forms.value.qq.qqSystemPrompt = asString(readQqShared(['systemPrompt']))
+    forms.value.qq.qqImageServerBaseUrl = asString(readQqShared(['imageServerBaseUrl']))
+    forms.value.qq.qqMarkdownSupport =
+      typeof readQqShared(['markdownSupport']) === 'boolean'
+        ? (readQqShared(['markdownSupport']) as boolean)
+        : true
+
     const feishu = getChannelConfigNode(channelsRaw, 'feishu')
     const readFeishuAccount = (path: string[]) => readChannelValue(feishu, getSelectedAccountId('feishu'), path)
     const readFeishuShared = (path: string[]) => readSharedChannelValue(feishu, path)
@@ -1756,6 +1935,19 @@ const openAppCenter = async () => {
   }
 }
 
+const scheduleGatewayRestartAfterChannelEnable = (channelName: string) => {
+  const restartCommand = resolveGatewayRestartCommand(props.systemOs)
+
+  gatewayRestartController.schedule(async () => {
+    try {
+      await invoke<string>('restart_gateway')
+      props.showToast('success', `已为 ${channelName} 发送网关重启命令：${restartCommand}`)
+    } catch (error) {
+      props.showToast('error', `网关重启失败：${String(error)}`)
+    }
+  })
+}
+
 const toggleChannelEnabled = async () => {
   if (!canConfigureCurrentChannel.value) {
     props.showToast('error', `${selectedChannel.value.name} 扩展未安装，暂不可配置`)
@@ -1774,10 +1966,14 @@ const toggleChannelEnabled = async () => {
     if (accountMode) {
       if (
         next &&
-        (channelId === 'feishu' || channelId === 'dingtalk') &&
+        (channelId === 'feishu' || channelId === 'wecom' || channelId === 'dingtalk') &&
         (!currentForm.value.token.trim() || !currentForm.value.userId.trim())
       ) {
         throw new Error(`${selectedChannel.value.name} 启用前需要先填写应用凭据`)
+      }
+
+      if (next && channelId === 'qq' && (!currentForm.value.token.trim() || !currentForm.value.userId.trim())) {
+        throw new Error(`${selectedChannel.value.name} 启用前需要先填写 App ID 和 App Secret`)
       }
 
       await persistConfigMutation(mutable => {
@@ -1819,6 +2015,9 @@ const toggleChannelEnabled = async () => {
 
     await syncChannelsFromConfig()
     props.showToast('success', `${selectedChannel.value.name}已${next ? '启用' : '停用'}`)
+    if (next) {
+      scheduleGatewayRestartAfterChannelEnable(selectedChannel.value.name)
+    }
   } catch (error) {
     currentForm.value.enabled = previous
     props.showToast('error', String(error))
@@ -1888,6 +2087,10 @@ const saveConfig = async () => {
             ? applyDiscordConfig
             : managedChannelId === 'slack'
               ? applySlackConfig
+              : managedChannelId === 'wecom'
+                ? applyWecomConfig
+                : managedChannelId === 'qq'
+                  ? applyQqConfig
               : managedChannelId === 'feishu'
                 ? applyFeishuConfig
                 : applyDingtalkConfig
@@ -1903,8 +2106,18 @@ const saveConfig = async () => {
           return
         }
 
-        if ((managedChannelId === 'feishu' || managedChannelId === 'dingtalk') && (!current.token.trim() || !current.userId.trim())) {
+        if (
+          (managedChannelId === 'feishu' ||
+            managedChannelId === 'wecom' ||
+            managedChannelId === 'dingtalk') &&
+          (!current.token.trim() || !current.userId.trim())
+        ) {
           props.showToast('error', `${selectedChannel.value.name} 需要先填写应用凭据`)
+          return
+        }
+
+        if (managedChannelId === 'qq' && (!current.token.trim() || !current.userId.trim())) {
+          props.showToast('error', 'QQ 需要先填写 App ID 和 App Secret')
           return
         }
 
@@ -2040,6 +2253,7 @@ onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside)
   unlistenExtensionInstallLog?.()
   unlistenExtensionInstallState?.()
+  gatewayRestartController.dispose()
 })
 </script>
 
@@ -2274,19 +2488,83 @@ onUnmounted(() => {
               </div>
             </template>
 
-            <template v-else-if="selectedChannelId === 'feishu' || selectedChannelId === 'dingtalk'">
+            <template v-else-if="selectedChannelId === 'qq'">
               <div>
                 <label class="mb-1.5 flex items-center gap-2 text-sm font-medium" style="color: var(--oc-text-secondary);">
-                  {{ selectedChannelId === 'feishu'
-                    ? `飞书 App ID（${accountScopedFieldPath('appId')}）`
-                    : `Client ID（${accountScopedFieldPath('clientId')}）` }}
+                  {{ `QQ App ID（${accountScopedFieldPath('appId')}）` }}
                   <span style="color: var(--oc-danger);">*</span>
                   <Check class="h-3.5 w-3.5" style="color: var(--oc-success);" v-if="currentForm.token" />
                 </label>
                 <Input
                   type="text"
                   :model-value="currentForm.token"
-                  :placeholder="selectedChannelId === 'feishu' ? '输入飞书 App ID（如 cli_xxxxx）' : '输入 Client ID'"
+                  placeholder="输入 QQ App ID"
+                  :disabled="!canConfigureCurrentChannel"
+                  @update:model-value="(value) => { currentForm.token = value }"
+                />
+              </div>
+
+              <div>
+                <label class="mb-1.5 flex items-center gap-2 text-sm font-medium" style="color: var(--oc-text-secondary);">
+                  {{ `QQ App Secret（${accountScopedFieldPath('clientSecret')}）` }}
+                  <span style="color: var(--oc-danger);">*</span>
+                  <Check class="h-3.5 w-3.5" style="color: var(--oc-success);" v-if="currentForm.userId" />
+                </label>
+                <div class="relative">
+                  <Input
+                    :type="revealSecret ? 'text' : 'password'"
+                    :model-value="currentForm.userId"
+                    placeholder="输入 QQ App Secret"
+                    class="pr-11"
+                    :disabled="!canConfigureCurrentChannel"
+                    @update:model-value="(value) => { currentForm.userId = value }"
+                  />
+                  <button
+                    type="button"
+                    class="absolute inset-y-0 right-0 flex w-10 items-center justify-center transition-colors hover:opacity-80"
+                    style="color: var(--oc-text-muted);"
+                    :disabled="!canConfigureCurrentChannel"
+                    @click="revealSecret = !revealSecret"
+                  >
+                    <EyeOff v-if="revealSecret" class="h-4 w-4" />
+                    <Eye v-else class="h-4 w-4" />
+                  </button>
+                </div>
+                <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-muted);">
+                  保存后将写入 <code>{{ accountScopedFieldPath('appId') }}</code> 与 <code>{{ accountScopedFieldPath('clientSecret') }}</code>，并清理旧的 <code>token</code> 字段。
+                </p>
+              </div>
+
+              <div>
+                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">账号名称（{{ accountScopedFieldPath('name') }}）</label>
+                <Input
+                  :model-value="currentForm.qqName"
+                  placeholder="可选，用于区分多个 QQ Bot"
+                  :disabled="!canConfigureCurrentChannel"
+                  @update:model-value="(value) => { currentForm.qqName = value }"
+                />
+              </div>
+            </template>
+
+            <template v-else-if="selectedChannelId === 'feishu' || selectedChannelId === 'wecom' || selectedChannelId === 'dingtalk'">
+              <div>
+                <label class="mb-1.5 flex items-center gap-2 text-sm font-medium" style="color: var(--oc-text-secondary);">
+                  {{ selectedChannelId === 'feishu'
+                    ? `飞书 App ID（${accountScopedFieldPath('appId')}）`
+                    : selectedChannelId === 'wecom'
+                      ? `企业微信 Bot ID（${accountScopedFieldPath('botId')}）`
+                      : `Client ID（${accountScopedFieldPath('clientId')}）` }}
+                  <span style="color: var(--oc-danger);">*</span>
+                  <Check class="h-3.5 w-3.5" style="color: var(--oc-success);" v-if="currentForm.token" />
+                </label>
+                <Input
+                  type="text"
+                  :model-value="currentForm.token"
+                  :placeholder="selectedChannelId === 'feishu'
+                    ? '输入飞书 App ID（如 cli_xxxxx）'
+                    : selectedChannelId === 'wecom'
+                      ? '输入企业微信 Bot ID'
+                      : '输入 Client ID'"
                   :disabled="!canConfigureCurrentChannel"
                   @update:model-value="(value) => { currentForm.token = value }"
                 />
@@ -2296,7 +2574,9 @@ onUnmounted(() => {
                 <label class="mb-1.5 flex items-center gap-2 text-sm font-medium" style="color: var(--oc-text-secondary);">
                   {{ selectedChannelId === 'feishu'
                     ? `飞书 App Secret（${accountScopedFieldPath('appSecret')}）`
-                    : `Client Secret（${accountScopedFieldPath('clientSecret')}）` }}
+                    : selectedChannelId === 'wecom'
+                      ? `企业微信 Secret（${accountScopedFieldPath('secret')}）`
+                      : `Client Secret（${accountScopedFieldPath('clientSecret')}）` }}
                   <span style="color: var(--oc-danger);">*</span>
                   <Check class="h-3.5 w-3.5" style="color: var(--oc-success);" v-if="currentForm.userId" />
                 </label>
@@ -2304,7 +2584,11 @@ onUnmounted(() => {
                   <Input
                     :type="revealSecret ? 'text' : 'password'"
                     :model-value="currentForm.userId"
-                    :placeholder="selectedChannelId === 'feishu' ? '输入飞书 App Secret' : '输入 Client Secret'"
+                    :placeholder="selectedChannelId === 'feishu'
+                      ? '输入飞书 App Secret'
+                      : selectedChannelId === 'wecom'
+                        ? '输入企业微信 Secret'
+                        : '输入 Client Secret'"
                     class="pr-11"
                     :disabled="!canConfigureCurrentChannel"
                     @update:model-value="(value) => { currentForm.userId = value }"
@@ -2322,7 +2606,19 @@ onUnmounted(() => {
                 </div>
               </div>
 
-              <template v-if="selectedChannelId === 'dingtalk'">
+              <template v-if="selectedChannelId === 'wecom'">
+                <div>
+                  <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">账号名称（{{ accountScopedFieldPath('name') }}）</label>
+                  <Input
+                    :model-value="currentForm.wecomName"
+                    placeholder="可选，用于区分多个企业微信机器人"
+                    :disabled="!canConfigureCurrentChannel"
+                    @update:model-value="(value) => { currentForm.wecomName = value }"
+                  />
+                </div>
+              </template>
+
+              <template v-else-if="selectedChannelId === 'dingtalk'">
                 <div class="grid gap-4 md:grid-cols-2">
                   <div>
                     <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">账号名称（{{ accountScopedFieldPath('name') }}）</label>
@@ -2709,6 +3005,61 @@ onUnmounted(() => {
               </div>
             </template>
 
+            <template v-if="false">
+              <div>
+                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">DM 策略（channels.wecom.dmPolicy）</label>
+                <select v-model="currentForm.wecomDmPolicy" class="oc-select" :disabled="!canConfigureCurrentChannel">
+                  <option value="pairing">pairing</option>
+                  <option value="allowlist">allowlist</option>
+                  <option value="open">open</option>
+                  <option value="disabled">disabled</option>
+                </select>
+              </div>
+
+              <div>
+                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">DM allowFrom（channels.wecom.allowFrom）</label>
+                <textarea
+                  class="oc-textarea"
+                  :value="currentForm.wecomAllowFrom"
+                  placeholder="每行一个用户 ID，open 模式建议包含 *"
+                  :disabled="!canConfigureCurrentChannel"
+                  @input="(event) => { currentForm.wecomAllowFrom = (event.target as HTMLTextAreaElement).value }"
+                />
+              </div>
+
+              <div>
+                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">群组策略（channels.wecom.groupPolicy）</label>
+                <select v-model="currentForm.wecomGroupPolicy" class="oc-select" :disabled="!canConfigureCurrentChannel">
+                  <option value="open">open</option>
+                  <option value="allowlist">allowlist</option>
+                  <option value="disabled">disabled</option>
+                </select>
+              </div>
+
+              <div>
+                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">群发送者白名单（channels.wecom.groupAllowFrom）</label>
+                <textarea
+                  class="oc-textarea"
+                  :value="currentForm.wecomGroupAllowFrom"
+                  placeholder="每行一个发送者用户 ID"
+                  :disabled="!canConfigureCurrentChannel"
+                  @input="(event) => { currentForm.wecomGroupAllowFrom = (event.target as HTMLTextAreaElement).value }"
+                />
+              </div>
+
+              <div>
+                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">群组白名单（channels.wecom.groups）</label>
+                <textarea
+                  class="oc-textarea"
+                  :value="currentForm.wecomGroups"
+                  placeholder="每行一个群组 chatId"
+                  :disabled="!canConfigureCurrentChannel"
+                  @input="(event) => { currentForm.wecomGroups = (event.target as HTMLTextAreaElement).value }"
+                />
+              </div>
+            </template>
+
+
             <template v-else-if="selectedChannelId === 'feishu'">
               <div>
                 <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">DM 策略（channels.feishu.dmPolicy）</label>
@@ -2798,7 +3149,19 @@ onUnmounted(() => {
           </div>
 
           <div v-else-if="selectedPanel === 'connection'" class="space-y-4">
-            <template v-if="selectedChannelId === 'feishu'">
+            <template v-if="selectedChannelId === 'wecom'">
+              <div>
+                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">WebSocket URL（channels.wecom.websocketUrl）</label>
+                <Input
+                  :model-value="currentForm.wecomWebsocketUrl"
+                  placeholder="可选，默认使用插件内置地址"
+                  :disabled="!canConfigureCurrentChannel"
+                  @update:model-value="(value) => { currentForm.wecomWebsocketUrl = value }"
+                />
+              </div>
+            </template>
+
+            <template v-else-if="selectedChannelId === 'feishu'">
               <div>
                 <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">连接模式（channels.feishu.connectionMode）</label>
                 <select v-model="currentForm.feishuConnectionMode" class="oc-select" :disabled="!canConfigureCurrentChannel">
@@ -3192,6 +3555,52 @@ onUnmounted(() => {
                 />
               </div>
             </template>
+
+            <template v-else-if="selectedChannelId === 'wecom'">
+              <label class="inline-flex items-center gap-2 text-sm" style="color: var(--oc-text-secondary);">
+                <input
+                  type="checkbox"
+                  :checked="currentForm.wecomSendThinkingMessage"
+                  :disabled="!canConfigureCurrentChannel"
+                  @change="(event) => { currentForm.wecomSendThinkingMessage = (event.target as HTMLInputElement).checked }"
+                />
+                发送思考中提示（channels.wecom.sendThinkingMessage）
+              </label>
+            </template>
+
+            <template v-else-if="selectedChannelId === 'qq'">
+              <label class="inline-flex items-center gap-2 text-sm" style="color: var(--oc-text-secondary);">
+                <input
+                  type="checkbox"
+                  :checked="currentForm.qqMarkdownSupport"
+                  :disabled="!canConfigureCurrentChannel"
+                  @change="(event) => { currentForm.qqMarkdownSupport = (event.target as HTMLInputElement).checked }"
+                />
+                启用 Markdown 消息（channels.qqbot.markdownSupport）
+              </label>
+
+              <div>
+                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">系统提示词（channels.qqbot.systemPrompt）</label>
+                <textarea
+                  class="oc-textarea"
+                  :value="currentForm.qqSystemPrompt"
+                  placeholder="可选，会拼接到用户消息前"
+                  :disabled="!canConfigureCurrentChannel"
+                  @input="(event) => { currentForm.qqSystemPrompt = (event.target as HTMLTextAreaElement).value }"
+                />
+              </div>
+
+              <div>
+                <label class="mb-1.5 block text-sm font-medium" style="color: var(--oc-text-secondary);">图床地址（channels.qqbot.imageServerBaseUrl）</label>
+                <Input
+                  :model-value="currentForm.qqImageServerBaseUrl"
+                  placeholder="http://your-ip:18765"
+                  :disabled="!canConfigureCurrentChannel"
+                  @update:model-value="(value) => { currentForm.qqImageServerBaseUrl = value }"
+                />
+              </div>
+            </template>
+
 
             <template v-else-if="selectedChannelId === 'feishu'">
               <div>

@@ -4,11 +4,14 @@ import {
   mergeDingtalkEditableConfig,
   resolveDingtalkChannelNode,
 } from './dingtalkPlugin'
+import { getChannelConfigKey } from './channelPluginCatalog'
 
 export type JsonRecord = Record<string, unknown>
 
 export type ManagedMessageChannelId =
   | 'feishu'
+  | 'wecom'
+  | 'qq'
   | 'dingtalk'
   | 'telegram'
   | 'discord'
@@ -16,6 +19,8 @@ export type ManagedMessageChannelId =
 
 export const MANAGED_MESSAGE_CHANNEL_IDS: ManagedMessageChannelId[] = [
   'feishu',
+  'wecom',
+  'qq',
   'dingtalk',
   'telegram',
   'discord',
@@ -27,6 +32,8 @@ const ACCOUNT_SCOPED_KEYS: Record<ManagedMessageChannelId, string[]> = {
   discord: ['enabled', 'token'],
   slack: ['enabled', 'botToken', 'appToken', 'signingSecret'],
   feishu: ['enabled', 'appId', 'appSecret'],
+  wecom: ['enabled', 'name', 'botId', 'secret'],
+  qq: ['enabled', 'name', 'token', 'appId', 'clientSecret', 'clientSecretFile'],
   dingtalk: ['enabled', 'name', 'clientId', 'clientSecret', 'robotCode', 'corpId', 'agentId'],
 }
 
@@ -94,6 +101,22 @@ const PUBLIC_SCOPED_KEYS: Record<ManagedMessageChannelId, string[]> = {
     'mediaMaxMb',
     'dynamicAgentCreation',
   ],
+  wecom: [
+    'dmPolicy',
+    'allowFrom',
+    'groupPolicy',
+    'groupAllowFrom',
+    'groups',
+    'websocketUrl',
+    'sendThinkingMessage',
+  ],
+  qq: [
+    'dmPolicy',
+    'allowFrom',
+    'systemPrompt',
+    'imageServerBaseUrl',
+    'markdownSupport',
+  ],
   dingtalk: [...(SHARED_SCOPED_KEYS.dingtalk || [])],
 }
 
@@ -115,6 +138,19 @@ const shortenCredential = (value: string): string => {
   return `${trimmed.slice(0, 6)}…${trimmed.slice(-4)}`
 }
 
+const getQqToken = (node: JsonRecord | undefined): string => {
+  if (!node) return ''
+
+  const token = asString(node.token)
+  if (token) return token
+
+  const appId = asString(node.appId)
+  const clientSecret = asString(node.clientSecret)
+  if (!appId || !clientSecret) return ''
+
+  return `${appId}:${clientSecret}`
+}
+
 const hasCredentials = (channelId: ManagedMessageChannelId, node: JsonRecord | undefined): boolean => {
   if (!node) return false
 
@@ -123,6 +159,12 @@ const hasCredentials = (channelId: ManagedMessageChannelId, node: JsonRecord | u
   if (channelId === 'slack') return asString(node.botToken).length > 0
   if (channelId === 'feishu') {
     return asString(node.appId).length > 0 && asString(node.appSecret).length > 0
+  }
+  if (channelId === 'wecom') {
+    return asString(node.botId).length > 0 && asString(node.secret).length > 0
+  }
+  if (channelId === 'qq') {
+    return getQqToken(node).length > 0
   }
 
   return asString(node.clientId).length > 0 && asString(node.clientSecret).length > 0
@@ -135,6 +177,8 @@ const getCredentialHint = (channelId: ManagedMessageChannelId, node: JsonRecord 
   if (channelId === 'discord') return shortenCredential(asString(node.token))
   if (channelId === 'slack') return shortenCredential(asString(node.botToken))
   if (channelId === 'feishu') return asString(node.appId)
+  if (channelId === 'wecom') return asString(node.botId)
+  if (channelId === 'qq') return shortenCredential(getQqToken(node))
 
   return (
     shortenCredential(asString(node.clientId)) ||
@@ -150,7 +194,7 @@ const getNameHint = (channelId: ManagedMessageChannelId, node: JsonRecord | unde
 }
 
 const getChannelKey = (channelId: ManagedMessageChannelId): string =>
-  channelId === 'dingtalk' ? DINGTALK_CHANNEL_KEY : channelId
+  channelId === 'dingtalk' ? DINGTALK_CHANNEL_KEY : getChannelConfigKey(channelId)
 
 const sanitizeAccountNode = (
   channelId: ManagedMessageChannelId,
@@ -194,7 +238,7 @@ export const getMessageChannelConfigNode = (
     return resolveDingtalkChannelNode(channelsRaw)
   }
 
-  return asRecord(channelsRaw[channelId]) || {}
+  return asRecord(channelsRaw[getChannelKey(channelId)]) || {}
 }
 
 export const collectMessageChannelAccountIds = (

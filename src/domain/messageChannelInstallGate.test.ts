@@ -12,6 +12,14 @@ describe('canConfigureMessageChannelBeforeInstall', () => {
   it('keeps Dingtalk gated behind extension installation', () => {
     expect(canConfigureMessageChannelBeforeInstall('dingtalk')).toBe(false)
   })
+
+  it('keeps WeCom gated behind extension installation', () => {
+    expect(canConfigureMessageChannelBeforeInstall('wecom')).toBe(false)
+  })
+
+  it('keeps QQ gated behind extension installation', () => {
+    expect(canConfigureMessageChannelBeforeInstall('qq')).toBe(false)
+  })
 })
 
 describe('shouldBlockMessageChannelConfigUntilInstall', () => {
@@ -29,6 +37,26 @@ describe('shouldBlockMessageChannelConfigUntilInstall', () => {
     expect(
       shouldBlockMessageChannelConfigUntilInstall({
         channelId: 'dingtalk',
+        isExtensionChannel: true,
+        installed: false,
+      })
+    ).toBe(true)
+  })
+
+  it('blocks WeCom until install completes', () => {
+    expect(
+      shouldBlockMessageChannelConfigUntilInstall({
+        channelId: 'wecom',
+        isExtensionChannel: true,
+        installed: false,
+      })
+    ).toBe(true)
+  })
+
+  it('blocks QQ until install completes', () => {
+    expect(
+      shouldBlockMessageChannelConfigUntilInstall({
+        channelId: 'qq',
         isExtensionChannel: true,
         installed: false,
       })

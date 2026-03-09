@@ -1,10 +1,16 @@
+import { getChannelPluginMeta } from './channelPluginCatalog'
+
 export type MessageChannelInstallGateInput = {
   channelId: string
   isExtensionChannel: boolean
   installed: boolean
 }
 
-export const canConfigureMessageChannelBeforeInstall = (_channelId: string): boolean => false
+export const canConfigureMessageChannelBeforeInstall = (channelId: string): boolean => {
+  const meta = getChannelPluginMeta(channelId)
+  if (!meta?.needsPluginInstall) return true
+  return false
+}
 
 export const shouldBlockMessageChannelConfigUntilInstall = ({
   channelId,
