@@ -11,6 +11,7 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
+    "tauri:build:mac": "./scripts/build-mac-universal.sh",
     "vendor:windows-tools": "node ./scripts/prepare-windows-tools-vendor.mjs"
   },
   "dependencies": {
