@@ -50,6 +50,7 @@ import {
   saveMessageChannelAccountConfig,
   saveMessageChannelDefaultAccountConfig,
   saveMessageChannelPublicConfig,
+  supportsMessageChannelMultipleAccounts,
   type ManagedMessageChannelId,
 } from '../../domain/messageChannelAccounts'
 import {
@@ -457,6 +458,10 @@ const channelIds: ChannelId[] = [
   'imessage',
 ]
 
+const channelSupportsMultipleAccounts = (channelId: ChannelId): boolean =>
+  !MANAGED_MESSAGE_CHANNEL_IDS.includes(channelId as ManagedMessageChannelId) ||
+  supportsMessageChannelMultipleAccounts(channelId as ManagedMessageChannelId)
+
 interface AgentOption {
   id: string
   label: string
@@ -786,6 +791,41 @@ const readSharedChannelValue = (channelNode: JsonRecord, path: string[]): unknow
   return undefined
 }
 
+const readCurrentAccountValue = (
+  channelId: ChannelId,
+  channelNode: JsonRecord,
+  path: string[]
+): unknown => {
+  if (channelSupportsMultipleAccounts(channelId)) {
+    return readChannelValue(channelNode, getSelectedAccountId(channelId), path)
+  }
+
+  const defaultValue = readChannelValue(channelNode, 'default', path)
+  if (defaultValue !== undefined) return defaultValue
+
+  const accounts = asRecord(channelNode.accounts)
+  if (!accounts) return undefined
+
+  const preferredIds: string[] = []
+  const configuredDefaultAccount = asString(channelNode.defaultAccount).trim()
+  if (configuredDefaultAccount) preferredIds.push(configuredDefaultAccount)
+
+  for (const accountId of Object.keys(accounts)) {
+    const trimmed = accountId.trim()
+    if (trimmed) preferredIds.push(trimmed)
+  }
+
+  const seen = new Set<string>()
+  for (const accountId of preferredIds) {
+    if (seen.has(accountId)) continue
+    seen.add(accountId)
+    const accountValue = getPathValue(asRecord(accounts[accountId]) || {}, path)
+    if (accountValue !== undefined) return accountValue
+  }
+
+  return undefined
+}
+
 const parseAgentOptions = (root: JsonRecord): AgentOption[] => {
   void root
   return [{ id: 'default', label: 'default' }]
@@ -868,6 +908,7 @@ const getSelectedAgentId = (channelId: ChannelId): string => {
 }
 
 const getSelectedAccountId = (channelId: ChannelId): string => {
+  if (!channelSupportsMultipleAccounts(channelId)) return 'default'
   const options = availableAccountsByChannel.value[channelId] || [{ id: 'default', label: '默认账号' }]
   const current = selectedAccountByChannel.value[channelId]
   if (current && options.some(option => option.id === current)) return current
@@ -876,6 +917,7 @@ const getSelectedAccountId = (channelId: ChannelId): string => {
 }
 
 const isAccountModeEnabled = (channelId: ChannelId): boolean => {
+  if (!channelSupportsMultipleAccounts(channelId)) return false
   const accounts = availableAccountsByChannel.value[channelId] || []
   return accounts.some(account => account.id !== 'default')
 }
@@ -1011,7 +1053,9 @@ const currentForm = computed(() => forms.value[selectedChannelId.value])
 const currentAccountOptions = computed(
   () => availableAccountsByChannel.value[selectedChannelId.value] || [{ id: 'default', label: '默认账号' }]
 )
-const showAccountSelector = computed(() => currentAccountOptions.value.length > 0)
+const showAccountSelector = computed(() =>
+  channelSupportsMultipleAccounts(selectedChannelId.value) && currentAccountOptions.value.length > 0
+)
 const currentAccountId = computed(() => getSelectedAccountId(selectedChannelId.value))
 const isManagedChannel = (channelId: ChannelId): channelId is ManagedMessageChannelId =>
   MANAGED_MESSAGE_CHANNEL_IDS.includes(channelId as ManagedMessageChannelId)
@@ -1024,6 +1068,7 @@ const publicPanelTabs = computed(() =>
     }))
 )
 const currentAccountTabLabel = computed(() => {
+  if (!channelSupportsMultipleAccounts(selectedChannelId.value)) return '账号配置'
   const accountLabel = currentAccountId.value === 'default' ? '默认账号' : currentAccountId.value
   return `账号独立配置 · ${accountLabel}`
 })
@@ -1037,7 +1082,9 @@ const currentAccountConfigPath = computed(() =>
 )
 const currentPanelScopeHint = computed(() =>
   selectedPanel.value === 'credentials'
-    ? `当前为账号独立配置，保存到 ${currentAccountConfigPath.value}。`
+    ? channelSupportsMultipleAccounts(selectedChannelId.value)
+      ? `当前为账号独立配置，保存到 ${currentAccountConfigPath.value}。`
+      : `当前为账号配置，保存到 ${currentChannelConfigRootPath.value}。`
     : `当前为公共配置，影响当前渠道所有账号，保存到 ${currentChannelConfigRootPath.value}。`
 )
 const saveButtonLabel = computed(() =>
@@ -1046,6 +1093,7 @@ const saveButtonLabel = computed(() =>
 const accountScopedFieldPath = (field: string) => `${currentAccountConfigPath.value}.${field}`
 
 const toggleAccountSelectorDropdown = () => {
+  if (!channelSupportsMultipleAccounts(selectedChannelId.value)) return
   if (!showAccountSelector.value || !canConfigureCurrentChannel.value) return
   selectedPanel.value = 'credentials'
   showAccountSelectorDropdown.value = !showAccountSelectorDropdown.value
@@ -1053,6 +1101,7 @@ const toggleAccountSelectorDropdown = () => {
 
 const handleAccountSelectionChange = async (value: string) => {
   const channelId = selectedChannelId.value
+  if (!channelSupportsMultipleAccounts(channelId)) return
   const next = value.trim()
   if (!next) return
   selectedPanel.value = 'credentials'
@@ -1066,6 +1115,7 @@ const handleAccountInputChange = (value: string) => {
 }
 
 const openAccountModal = () => {
+  if (!channelSupportsMultipleAccounts(selectedChannelId.value)) return
   accountInput.value = ''
   selectedPanel.value = 'credentials'
   showAccountSelectorDropdown.value = false
@@ -1079,6 +1129,7 @@ const closeAccountModal = () => {
 
 const submitAccount = async () => {
   const channelId = selectedChannelId.value
+  if (!channelSupportsMultipleAccounts(channelId)) return
   const nextAccountId = accountInput.value.trim()
   if (!nextAccountId) return
 
@@ -1129,6 +1180,7 @@ const submitAccount = async () => {
 
 const removeSelectedAccount = async () => {
   const channelId = selectedChannelId.value
+  if (!channelSupportsMultipleAccounts(channelId)) return
   const accountId = getSelectedAccountId(channelId)
   if (accountId === 'default') return
   if (!window.confirm(`确认删除账号 ${accountId}？`)) return
@@ -1586,9 +1638,11 @@ const syncChannelsFromConfig = async () => {
           : accountIds.includes(previousAccountId)
             ? previousAccountId
             : channelDefaultAccountId) || 'default'
-      selectedAccountByChannel.value[channelId] = nextAccountId
+      selectedAccountByChannel.value[channelId] = channelSupportsMultipleAccounts(channelId)
+        ? nextAccountId
+        : 'default'
 
-      const enabledValue = readChannelValue(channelNode, nextAccountId, ['enabled'])
+      const enabledValue = readCurrentAccountValue(channelId, channelNode, ['enabled'])
       forms.value[channelId].enabled =
         typeof enabledValue === 'boolean' ? enabledValue : Boolean(channelNode.enabled)
     }
@@ -1742,7 +1796,7 @@ const syncChannelsFromConfig = async () => {
     forms.value.imessage.imessageChunkMode = asString(readIMessage(['chunkMode'])) || 'sentence'
 
     const wecom = getChannelConfigNode(channelsRaw, 'wecom')
-    const readWecomAccount = (path: string[]) => readChannelValue(wecom, getSelectedAccountId('wecom'), path)
+    const readWecomAccount = (path: string[]) => readCurrentAccountValue('wecom', wecom, path)
     const readWecomShared = (path: string[]) => readSharedChannelValue(wecom, path)
     forms.value.wecom.token = asString(readWecomAccount(['botId']))
     forms.value.wecom.userId = asString(readWecomAccount(['secret']))
@@ -1767,11 +1821,13 @@ const syncChannelsFromConfig = async () => {
         : true
 
     const qq = getChannelConfigNode(channelsRaw, 'qq')
-    const readQqAccount = (path: string[]) => readChannelValue(qq, getSelectedAccountId('qq'), path)
+    const readQqAccount = (path: string[]) => readCurrentAccountValue('qq', qq, path)
     const readQqShared = (path: string[]) => readSharedChannelValue(qq, path)
-    const qqCredentials = parseQqCredentialsFromConfig(
-      asRecord(readChannelValue(qq, getSelectedAccountId('qq'), [])) || asRecord(qq)
-    )
+    const qqCredentials = parseQqCredentialsFromConfig({
+      token: readQqAccount(['token']),
+      appId: readQqAccount(['appId']),
+      clientSecret: readQqAccount(['clientSecret']),
+    })
     forms.value.qq.token = qqCredentials.appId
     forms.value.qq.userId = qqCredentials.clientSecret
     forms.value.qq.qqName = asString(readQqAccount(['name']))

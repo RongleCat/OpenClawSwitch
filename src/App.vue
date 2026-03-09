@@ -50,6 +50,7 @@ import {
   shouldShowOpenClawUninstallAction as shouldRenderOpenClawUninstallAction,
 } from './domain/openclawUninstall'
 import { resolveAsyncButtonLabel, resolveAsyncButtonState, runAsyncOnce } from './domain/asyncButtonState'
+import { formatOpenClawVersionLabel } from './domain/openclawVersionLabel'
 import { shouldShowOpenConfigFileAction } from './domain/sidebarConfigStatus'
 import appIcon from './assets/app-icon.png'
 import type {
@@ -232,7 +233,7 @@ const themeModeIcon = computed(() => {
   return Monitor
 })
 const themeButtonTitle = computed(() => `主题：${themeModeLabel.value}（点击切换）`)
-const globalVersionText = computed(() => envStatus.value?.openclaw.version || '--')
+const globalVersionText = computed(() => formatOpenClawVersionLabel(envStatus.value?.openclaw.version))
 const configStatusText = computed(() => {
   if (!openclawInstalled.value) return '未安装'
   if (!configLoaded.value) return '未加载'
