@@ -42,6 +42,16 @@ export interface QuickSetupCustomProviderInput {
   selectedModelId: string
 }
 
+export interface QuickSetupModelOption {
+  id: string
+  name: string
+}
+
+export interface QuickSetupModelOptionsInput {
+  fetchedModels: string[]
+  modelQuery: string
+}
+
 export interface GatewayInstallPlan {
   title: string
   summary: string
@@ -339,7 +349,8 @@ export const QUICK_SETUP_CHANNEL_PRESETS: QuickSetupChannelPreset[] = [
     id: 'feishu',
     name: '飞书',
     description: '填写 App ID 和 App Secret。',
-    placeholderLabel: 'Token',
+    placeholderLabel: 'App ID',
+    secretLabel: 'App Secret',
   },
   {
     id: 'wecom',
@@ -393,6 +404,32 @@ export const createQuickSetupCustomProviderPreset = ({
     ? [{ id: selectedModelId.trim(), name: selectedModelId.trim() }]
     : [],
 })
+
+export const buildQuickSetupModelOptions = ({
+  fetchedModels,
+  modelQuery,
+}: QuickSetupModelOptionsInput): QuickSetupModelOption[] => {
+  const unique = new Map<string, QuickSetupModelOption>()
+  const typedModelId = modelQuery.trim()
+
+  if (typedModelId) {
+    unique.set(typedModelId, {
+      id: typedModelId,
+      name: typedModelId,
+    })
+  }
+
+  for (const modelId of fetchedModels) {
+    const trimmedModelId = modelId.trim()
+    if (!trimmedModelId || unique.has(trimmedModelId)) continue
+    unique.set(trimmedModelId, {
+      id: trimmedModelId,
+      name: trimmedModelId,
+    })
+  }
+
+  return Array.from(unique.values())
+}
 
 export const applyQuickSetupModelPreset = (
   config: OpenClawConfig,

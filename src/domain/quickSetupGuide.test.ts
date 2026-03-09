@@ -6,6 +6,7 @@ import {
   QUICK_SETUP_PROVIDER_PRESETS,
   applyQuickSetupGatewayOptions,
   applyQuickSetupModelPreset,
+  buildQuickSetupModelOptions,
   clearQuickSetupManagedChannels,
   canSkipQuickSetupStep,
   createQuickSetupCustomProviderPreset,
@@ -157,6 +158,40 @@ describe('provider presets', () => {
     })
     expect(next.agents?.defaults?.model?.primary).toBe('my-openai/custom-main')
   })
+
+  it('keeps the model dropdown empty until remote models arrive, while still allowing a typed model id to be saved', () => {
+    expect(
+      buildQuickSetupModelOptions({
+        fetchedModels: [],
+        modelQuery: '',
+      })
+    ).toEqual([])
+
+    expect(
+      buildQuickSetupModelOptions({
+        fetchedModels: [],
+        modelQuery: 'openai/gpt-4.1',
+      })
+    ).toEqual([
+      {
+        id: 'openai/gpt-4.1',
+        name: 'openai/gpt-4.1',
+      },
+    ])
+  })
+
+  it('deduplicates fetched models and keeps the typed query visible at the top when it is not in the fetched list', () => {
+    expect(
+      buildQuickSetupModelOptions({
+        fetchedModels: ['qwen-plus', 'qwen-plus', 'qwen-max'],
+        modelQuery: 'custom-main',
+      })
+    ).toEqual([
+      { id: 'custom-main', name: 'custom-main' },
+      { id: 'qwen-plus', name: 'qwen-plus' },
+      { id: 'qwen-max', name: 'qwen-max' },
+    ])
+  })
 })
 
 describe('channel presets', () => {
@@ -167,6 +202,16 @@ describe('channel presets', () => {
       'qq',
       'dingtalk',
     ])
+  })
+
+  it('keeps feishu quick setup on separate app id and app secret fields', () => {
+    const preset = QUICK_SETUP_CHANNEL_PRESETS.find((item) => item.id === 'feishu')
+
+    expect(preset).toMatchObject({
+      id: 'feishu',
+      placeholderLabel: 'App ID',
+      secretLabel: 'App Secret',
+    })
   })
 
   it('keeps qq quick setup on separate app id and app secret fields', () => {
