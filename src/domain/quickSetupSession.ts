@@ -50,7 +50,7 @@ const validProviderIds = new Set<QuickSetupProviderId>([
   'tencent-coding',
   'deepseek',
   'dashscope',
-  'hunyuan',
+  'siliconflow',
   'custom',
 ])
 const validModelSelectionModes = new Set<QuickSetupModelSelectionMode>(['auto', 'manual'])

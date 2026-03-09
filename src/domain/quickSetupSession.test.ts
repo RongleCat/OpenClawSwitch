@@ -167,4 +167,33 @@ describe('quick setup session storage', () => {
       toolsFullProfileEnabled: true,
     })
   })
+
+  it('falls back to dashscope coding when a removed provider id is restored from cache', () => {
+    const storage = createMemoryStorage()
+    storage.setItem(
+      QUICK_SETUP_SESSION_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        status: 'in_progress',
+        stepId: 'model',
+        savedStepIds: [],
+        selectedProviderId: 'hunyuan',
+        providerApiKey: '',
+        modelQuery: '',
+        modelSelectionMode: 'auto',
+        customProviderName: '',
+        customProviderBaseUrl: '',
+        selectedChannelId: 'feishu',
+        channelIdValue: '',
+        channelSecretValue: '',
+        browserDefaultProfileEnabled: false,
+        toolsFullProfileEnabled: false,
+        updatedAt: 100,
+      })
+    )
+
+    expect(loadQuickSetupSession(storage, 100)).toMatchObject({
+      selectedProviderId: 'dashscope-coding',
+    })
+  })
 })
