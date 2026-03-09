@@ -31,6 +31,10 @@ export interface ChannelPluginStatus {
   dingtalkInstalled: boolean
 }
 
+export interface MessageChannelDisplayItem {
+  id: MessageChannelId | string
+}
+
 export const CHANNEL_PLUGIN_CATALOG: ChannelPluginMeta[] = [
   {
     id: 'feishu',
@@ -142,3 +146,25 @@ export const isChannelPluginInstalled = (
 export const QUICK_SETUP_CHANNEL_ORDER: PluginInstallChannelId[] = ['feishu', 'wecom', 'qq', 'dingtalk']
 export const MESSAGE_CHANNEL_PRIMARY_ORDER: PluginInstallChannelId[] = ['feishu', 'wecom', 'qq', 'dingtalk']
 export const PLUGIN_INSTALL_CHANNEL_IDS: PluginInstallChannelId[] = ['feishu', 'wecom', 'qq', 'dingtalk']
+export const MESSAGE_CHANNEL_DISPLAY_ORDER: MessageChannelId[] = [
+  'feishu',
+  'wecom',
+  'qq',
+  'dingtalk',
+  'slack',
+  'whatsapp',
+  'imessage',
+  'telegram',
+  'discord',
+]
+
+export const sortMessageChannelsForDisplay = <T extends MessageChannelDisplayItem>(items: T[]): T[] => {
+  const order = new Map<string, number>(MESSAGE_CHANNEL_DISPLAY_ORDER.map((channelId, index) => [channelId, index]))
+
+  return [...items].sort((left, right) => {
+    const leftRank = order.get(left.id) ?? Number.MAX_SAFE_INTEGER
+    const rightRank = order.get(right.id) ?? Number.MAX_SAFE_INTEGER
+    if (leftRank !== rightRank) return leftRank - rightRank
+    return String(left.id).localeCompare(String(right.id))
+  })
+}

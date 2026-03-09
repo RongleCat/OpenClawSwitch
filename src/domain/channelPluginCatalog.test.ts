@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
   CHANNEL_PLUGIN_CATALOG,
+  MESSAGE_CHANNEL_DISPLAY_ORDER,
   MESSAGE_CHANNEL_PRIMARY_ORDER,
   PLUGIN_INSTALL_CHANNEL_IDS,
   QUICK_SETUP_CHANNEL_ORDER,
   getChannelConfigKey,
   isChannelPluginInstalled,
   getChannelPluginMeta,
+  sortMessageChannelsForDisplay,
 } from './channelPluginCatalog'
 
 describe('CHANNEL_PLUGIN_CATALOG', () => {
@@ -81,5 +83,18 @@ describe('CHANNEL_PLUGIN_CATALOG', () => {
       'whatsapp',
       'imessage',
     ])
+  })
+
+  it('pushes telegram and discord to the tail of the message channel display order', () => {
+    expect(MESSAGE_CHANNEL_DISPLAY_ORDER.slice(-2)).toEqual(['telegram', 'discord'])
+
+    expect(
+      sortMessageChannelsForDisplay([
+        { id: 'discord', label: 'Discord' },
+        { id: 'slack', label: 'Slack' },
+        { id: 'telegram', label: 'Telegram' },
+        { id: 'feishu', label: '飞书' },
+      ]).map((item) => item.id)
+    ).toEqual(['feishu', 'slack', 'telegram', 'discord'])
   })
 })
