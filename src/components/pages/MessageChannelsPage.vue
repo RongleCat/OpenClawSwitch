@@ -36,6 +36,10 @@ import {
   mergeDingtalkEditableConfig,
   resolveDingtalkChannelNode,
 } from '../../domain/dingtalkPlugin'
+import {
+  ensureFeishuPluginAllowed,
+  mergeFeishuChannelConfig,
+} from '../../domain/feishuPlugin'
 import { messageChannelHeaderLayout } from '../../domain/messageChannelHeaderLayout'
 import {
   MANAGED_MESSAGE_CHANNEL_IDS,
@@ -62,6 +66,7 @@ import {
   isChannelPluginInstalled,
   MESSAGE_CHANNEL_PRIMARY_ORDER,
   PLUGIN_INSTALL_CHANNEL_IDS,
+  sortMessageChannelsForDisplay,
   type ChannelPluginStatus,
 } from '../../domain/channelPluginCatalog'
 import {
@@ -227,7 +232,7 @@ const props = withDefaults(
   {}
 )
 
-const channelList: ChannelMeta[] = [
+const channelList: ChannelMeta[] = sortMessageChannelsForDisplay([
   { id: 'feishu', name: '飞书', icon: MessageCircle, iconColor: 'var(--oc-accent)' },
   { id: 'wecom', name: '企业微信', icon: MessageCircle, iconColor: 'var(--oc-success)' },
   { id: 'qq', name: 'QQ', icon: Bell, iconColor: 'var(--oc-warning)' },
@@ -235,7 +240,7 @@ const channelList: ChannelMeta[] = [
   { id: 'telegram', name: 'Telegram', icon: Send, iconColor: 'var(--oc-accent)' },
   { id: 'discord', name: 'Discord', icon: Hash, iconColor: 'var(--oc-warning)' },
   { id: 'slack', name: 'Slack', icon: Slack, iconColor: 'var(--oc-warning)' },
-]
+])
 
 const hints: Record<ChannelId, string> = {
   wecom: '按企业微信插件配置 Bot ID、Secret、访问策略、群组白名单与连接参数。',
@@ -1432,6 +1437,7 @@ const applyQqConfig = (mutable: JsonRecord, form: ChannelForm) => {
 }
 
 const applyFeishuConfig = (mutable: JsonRecord, form: ChannelForm) => {
+  ensureFeishuPluginAllowed(mutable)
   setPathValue(mutable, ['channels', 'feishu', 'enabled'], form.enabled)
   setStringOrDelete(mutable, ['channels', 'feishu', 'appId'], form.token)
   setStringOrDelete(mutable, ['channels', 'feishu', 'appSecret'], form.userId)
@@ -1995,10 +2001,12 @@ const toggleChannelEnabled = async () => {
       if (!currentForm.value.token.trim() || !currentForm.value.userId.trim()) {
         throw new Error('请先填写飞书 App ID 和 App Secret')
       }
-      await invoke<string>('set_feishu_channel_config', {
-        appId: currentForm.value.token.trim(),
-        appSecret: currentForm.value.userId.trim(),
-        enabled: next
+      await persistConfigMutation(mutable => {
+        mergeFeishuChannelConfig(mutable, {
+          appId: currentForm.value.token.trim(),
+          appSecret: currentForm.value.userId.trim(),
+          enabled: next,
+        })
       })
     } else if (channelId === 'dingtalk') {
       if (!currentForm.value.token.trim() || !currentForm.value.userId.trim()) {
@@ -2127,14 +2135,6 @@ const saveConfig = async () => {
           managedApplyChannelConfig
         )
 
-        if (managedChannelId === 'feishu' && selectedAccountId === 'default') {
-          await invoke<string>('set_feishu_channel_config', {
-            appId: current.token.trim(),
-            appSecret: current.userId.trim(),
-            enabled: current.enabled
-          })
-        }
-
         if (managedChannelId === 'dingtalk' && selectedAccountId === 'default') {
           await invoke<string>('set_dingtalk_channel_config', {
             clientId: current.token.trim(),
@@ -2258,12 +2258,12 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="oc-page-root">
+  <div class="oc-page-root h-full min-h-0">
     <div class="grid h-full min-h-0 grid-cols-1 gap-3 lg:grid-cols-[292px_minmax(0,1fr)]">
-      <section class="oc-panel min-h-0 overflow-visible flex flex-col">
-        <div class="border-b px-4 py-3" style="border-color: var(--oc-divider-soft);">
-          <h3 class="text-lg font-semibold" style="color: var(--oc-text-primary);">消息渠道</h3>
-          <p class="mt-1 text-xs" style="color: var(--oc-text-muted);">在左侧选择渠道，右侧分段菜单切换对应配置表单。</p>
+      <section class="oc-panel flex min-h-0 flex-col overflow-hidden">
+        <div class="border-b px-4 py-2.5" style="border-color: var(--oc-divider-soft);">
+          <h3 class="text-base font-semibold" style="color: var(--oc-text-primary);">消息渠道</h3>
+          <p class="mt-0.5 text-xs" style="color: var(--oc-text-muted);">在左侧选择渠道，右侧分段菜单切换对应配置表单。</p>
         </div>
 
         <div class="min-h-0 flex-1 overflow-y-auto p-3">
@@ -2308,17 +2308,17 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <section class="oc-panel min-h-0 overflow-hidden flex flex-col">
-        <div class="border-b px-5 py-4" style="border-color: var(--oc-divider-soft);">
+      <section class="oc-panel flex min-h-0 flex-col overflow-hidden">
+        <div class="border-b px-5 py-3" style="border-color: var(--oc-divider-soft);">
           <div class="flex items-start justify-between gap-3">
             <div :class="messageChannelHeaderLayout.leftColumn">
               <div class="flex items-center gap-3">
-                <div class="flex h-10 w-10 items-center justify-center rounded-full border" style="border-color: var(--oc-divider); background: var(--oc-card-elevated);">
+                <div class="flex h-9 w-9 items-center justify-center rounded-full border" style="border-color: var(--oc-divider); background: var(--oc-card-elevated);">
                   <component :is="selectedChannel.icon" :class="['h-5 w-5', messageChannelHeaderLayout.icon]" :style="{ color: selectedChannel.iconColor }" />
                 </div>
                 <div :class="messageChannelHeaderLayout.leftMeta">
-                  <h3 class="text-[22px] font-semibold leading-tight" style="color: var(--oc-text-primary);">配置 {{ selectedChannel.name }}</h3>
-                  <p class="mt-1 text-sm" style="color: var(--oc-text-muted);">{{ hints[selectedChannelId] }}</p>
+                  <h3 class="text-xl font-semibold leading-tight" style="color: var(--oc-text-primary);">配置 {{ selectedChannel.name }}</h3>
+                  <p class="mt-0.5 text-sm leading-5" style="color: var(--oc-text-muted);">{{ hints[selectedChannelId] }}</p>
                 </div>
               </div>
             </div>
@@ -3747,7 +3747,7 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div class="border-t px-5 py-3" style="border-color: var(--oc-divider-soft);">
+        <div class="border-t px-5 py-3 shrink-0" style="border-color: var(--oc-divider-soft);">
           <div class="flex items-center gap-3">
             <Button class="min-w-[132px]" :disabled="!canConfigureCurrentChannel || installingExtension" @click="saveConfig">
               <Save class="h-4 w-4" />
