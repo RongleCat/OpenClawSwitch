@@ -27,6 +27,8 @@ export const MANAGED_MESSAGE_CHANNEL_IDS: ManagedMessageChannelId[] = [
   'slack',
 ]
 
+const SINGLE_ACCOUNT_CHANNEL_IDS = new Set<ManagedMessageChannelId>(['wecom', 'qq'])
+
 const ACCOUNT_SCOPED_KEYS: Record<ManagedMessageChannelId, string[]> = {
   telegram: ['enabled', 'botToken'],
   discord: ['enabled', 'token'],
@@ -290,6 +292,10 @@ export const buildMessageChannelAccountLabel = (
 
 export const isMessageChannelAccountIdValid = (value: string): boolean =>
   ACCOUNT_ID_PATTERN.test(value.trim())
+
+export const supportsMessageChannelMultipleAccounts = (
+  channelId: ManagedMessageChannelId
+): boolean => !SINGLE_ACCOUNT_CHANNEL_IDS.has(channelId)
 
 export const isMessageChannelConfigured = (
   channelId: ManagedMessageChannelId,

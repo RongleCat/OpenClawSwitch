@@ -10,6 +10,7 @@ import {
   saveMessageChannelAccountConfig,
   saveMessageChannelDefaultAccountConfig,
   saveMessageChannelPublicConfig,
+  supportsMessageChannelMultipleAccounts,
 } from './messageChannelAccounts'
 
 describe('MANAGED_MESSAGE_CHANNEL_IDS', () => {
@@ -23,6 +24,15 @@ describe('MANAGED_MESSAGE_CHANNEL_IDS', () => {
       'discord',
       'slack',
     ])
+  })
+})
+
+describe('supportsMessageChannelMultipleAccounts', () => {
+  it('disables multi-account mode for qq and wecom only', () => {
+    expect(supportsMessageChannelMultipleAccounts('qq')).toBe(false)
+    expect(supportsMessageChannelMultipleAccounts('wecom')).toBe(false)
+    expect(supportsMessageChannelMultipleAccounts('feishu')).toBe(true)
+    expect(supportsMessageChannelMultipleAccounts('telegram')).toBe(true)
   })
 })
 
