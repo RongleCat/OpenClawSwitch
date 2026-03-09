@@ -84,7 +84,10 @@ describe('quick setup session storage', () => {
       selectedProviderId: 'dashscope-coding',
       providerApiKey: 'sk-test',
       modelQuery: 'qwen3.5-plus',
-      selectedChannelId: 'feishu',
+      modelSelectionMode: 'auto',
+      customProviderName: '',
+      customProviderBaseUrl: '',
+      selectedChannelId: 'wecom',
       channelIdValue: 'app-id',
       channelSecretValue: 'app-secret',
       browserDefaultProfileEnabled: true,
@@ -115,7 +118,10 @@ describe('quick setup session storage', () => {
         selectedProviderId: 'dashscope-coding',
         providerApiKey: '',
         modelQuery: '',
-        selectedChannelId: 'feishu',
+        modelSelectionMode: 'manual',
+        customProviderName: 'custom-provider',
+        customProviderBaseUrl: 'https://example.com/v1',
+        selectedChannelId: 'qq',
         channelIdValue: '',
         channelSecretValue: '',
         browserDefaultProfileEnabled: false,
@@ -127,5 +133,38 @@ describe('quick setup session storage', () => {
 
     clearQuickSetupSession(storage)
     expect(storage.getItem(QUICK_SETUP_SESSION_STORAGE_KEY)).toBeNull()
+  })
+
+  it('restores custom provider fields for the redesigned model step', () => {
+    const storage = createMemoryStorage()
+    storage.setItem(
+      QUICK_SETUP_SESSION_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        status: 'in_progress',
+        stepId: 'model',
+        savedStepIds: ['model'],
+        selectedProviderId: 'custom',
+        providerApiKey: 'sk-custom',
+        modelQuery: 'openai/gpt-custom',
+        modelSelectionMode: 'manual',
+        customProviderName: 'custom-openai',
+        customProviderBaseUrl: 'https://custom.example.com/v1',
+        selectedChannelId: 'feishu',
+        channelIdValue: '',
+        channelSecretValue: '',
+        browserDefaultProfileEnabled: false,
+        toolsFullProfileEnabled: true,
+        updatedAt: 100,
+      })
+    )
+
+    expect(loadQuickSetupSession(storage, 100)).toMatchObject({
+      selectedProviderId: 'custom',
+      modelSelectionMode: 'manual',
+      customProviderName: 'custom-openai',
+      customProviderBaseUrl: 'https://custom.example.com/v1',
+      toolsFullProfileEnabled: true,
+    })
   })
 })

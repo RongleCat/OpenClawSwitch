@@ -11,6 +11,7 @@ export const QUICK_SETUP_SESSION_TTL_MS = 24 * 60 * 60 * 1000
 
 export type QuickSetupSessionStatus = 'in_progress' | 'awaiting_admin_relaunch'
 export type QuickSetupSessionEnvMode = 'local' | 'ssh'
+export type QuickSetupModelSelectionMode = 'auto' | 'manual'
 
 export interface QuickSetupSessionPersistenceInput {
   restoringSession: boolean
@@ -25,6 +26,9 @@ export interface QuickSetupSessionSnapshot {
   selectedProviderId: QuickSetupProviderId
   providerApiKey: string
   modelQuery: string
+  modelSelectionMode: QuickSetupModelSelectionMode
+  customProviderName: string
+  customProviderBaseUrl: string
   selectedChannelId: QuickSetupChannelId
   channelIdValue: string
   channelSecretValue: string
@@ -40,14 +44,16 @@ export interface QuickSetupSessionStorage {
 }
 
 const validStepIds = new Set<QuickSetupStepId>(QUICK_SETUP_STEPS.map((step) => step.id))
-const validChannelIds = new Set<QuickSetupChannelId>(['feishu', 'dingtalk', 'telegram', 'discord', 'slack'])
+const validChannelIds = new Set<QuickSetupChannelId>(['feishu', 'wecom', 'qq', 'dingtalk'])
 const validProviderIds = new Set<QuickSetupProviderId>([
   'dashscope-coding',
   'tencent-coding',
   'deepseek',
   'dashscope',
   'hunyuan',
+  'custom',
 ])
+const validModelSelectionModes = new Set<QuickSetupModelSelectionMode>(['auto', 'manual'])
 
 const resolveStorage = (storage?: QuickSetupSessionStorage | null) => {
   if (storage) return storage
@@ -70,6 +76,9 @@ export const createQuickSetupSessionSnapshot = (
   selectedProviderId: validProviderIds.has(input.selectedProviderId) ? input.selectedProviderId : 'dashscope-coding',
   providerApiKey: input.providerApiKey,
   modelQuery: input.modelQuery,
+  modelSelectionMode: validModelSelectionModes.has(input.modelSelectionMode) ? input.modelSelectionMode : 'auto',
+  customProviderName: input.customProviderName,
+  customProviderBaseUrl: input.customProviderBaseUrl,
   selectedChannelId: validChannelIds.has(input.selectedChannelId) ? input.selectedChannelId : 'feishu',
   channelIdValue: input.channelIdValue,
   channelSecretValue: input.channelSecretValue,
@@ -122,6 +131,9 @@ export const loadQuickSetupSession = (
       selectedProviderId: (parsed.selectedProviderId as QuickSetupProviderId) ?? 'dashscope-coding',
       providerApiKey: typeof parsed.providerApiKey === 'string' ? parsed.providerApiKey : '',
       modelQuery: typeof parsed.modelQuery === 'string' ? parsed.modelQuery : '',
+      modelSelectionMode: (parsed.modelSelectionMode as QuickSetupModelSelectionMode) ?? 'auto',
+      customProviderName: typeof parsed.customProviderName === 'string' ? parsed.customProviderName : '',
+      customProviderBaseUrl: typeof parsed.customProviderBaseUrl === 'string' ? parsed.customProviderBaseUrl : '',
       selectedChannelId: (parsed.selectedChannelId as QuickSetupChannelId) ?? 'feishu',
       channelIdValue: typeof parsed.channelIdValue === 'string' ? parsed.channelIdValue : '',
       channelSecretValue: typeof parsed.channelSecretValue === 'string' ? parsed.channelSecretValue : '',

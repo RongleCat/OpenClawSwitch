@@ -1,13 +1,15 @@
 import type { ModelConfig, OpenClawConfig, ProviderConfig } from '../types/config'
+import { QUICK_SETUP_CHANNEL_ORDER } from './channelPluginCatalog'
 
 export type QuickSetupStepId = 'model' | 'channel' | 'gateway'
-export type QuickSetupChannelId = 'feishu' | 'dingtalk' | 'telegram' | 'discord' | 'slack'
+export type QuickSetupChannelId = 'feishu' | 'wecom' | 'qq' | 'dingtalk'
 export type QuickSetupProviderId =
   | 'dashscope-coding'
   | 'tencent-coding'
   | 'deepseek'
   | 'dashscope'
   | 'hunyuan'
+  | 'custom'
 
 export interface QuickSetupStepMeta {
   id: QuickSetupStepId
@@ -21,6 +23,7 @@ export interface QuickSetupProviderPreset {
   displayName: string
   description: string
   baseUrl: string
+  isCustom?: boolean
   suggestedModels: Array<{ id: string; name: string }>
   providerModels: ModelConfig[]
 }
@@ -30,7 +33,13 @@ export interface QuickSetupChannelPreset {
   name: string
   description: string
   placeholderLabel: string
-  secretLabel: string
+  secretLabel?: string
+}
+
+export interface QuickSetupCustomProviderInput {
+  providerName: string
+  baseUrl: string
+  selectedModelId: string
 }
 
 export interface GatewayInstallPlan {
@@ -43,6 +52,13 @@ export interface QuickSetupGatewayOptions {
   browserDefaultProfileEnabled: boolean
   toolsFullProfileEnabled: boolean
 }
+
+const QUICK_SETUP_INTERNAL_HOOK_ENTRY_IDS = [
+  'boot-md',
+  'bootstrap-extra-files',
+  'command-logger',
+  'session-memory',
+] as const
 
 export const QUICK_SETUP_PRIMARY_PROVIDER_IDS: QuickSetupProviderId[] = [
   'dashscope-coding',
@@ -195,9 +211,9 @@ const cloneConfig = (config: OpenClawConfig): OpenClawConfig =>
   JSON.parse(JSON.stringify(config ?? {})) as OpenClawConfig
 
 const buildProviderConfig = (preset: QuickSetupProviderPreset, apiKey: string, selectedModelId: string): ProviderConfig => {
-  const providerModels = preset.providerModels.map(model => ({ ...model }))
+  const providerModels = preset.providerModels.map((model) => ({ ...model }))
 
-  if (!providerModels.some(model => model.id === selectedModelId)) {
+  if (!providerModels.some((model) => model.id === selectedModelId)) {
     providerModels.push({
       id: selectedModelId,
       name: selectedModelId,
@@ -216,7 +232,7 @@ export const QUICK_SETUP_STEPS: QuickSetupStepMeta[] = [
   {
     id: 'model',
     title: '配置大模型',
-    subtitle: '选择服务商、填写 Key、确认主模型。',
+    subtitle: '选择服务商、填写 Key，并确认一个主模型。',
   },
   {
     id: 'channel',
@@ -306,12 +322,35 @@ export const QUICK_SETUP_PROVIDER_PRESETS: QuickSetupProviderPreset[] = [
       { id: 'hunyuan-t1-latest', name: 'Hunyuan T1' },
     ],
   },
+  {
+    id: 'custom',
+    name: 'custom',
+    displayName: '自定义模型',
+    description: '手动填写兼容 OpenAI Completions 的服务商信息与一个主模型。',
+    baseUrl: '',
+    isCustom: true,
+    suggestedModels: [],
+    providerModels: [],
+  },
 ]
 
 export const QUICK_SETUP_CHANNEL_PRESETS: QuickSetupChannelPreset[] = [
   {
     id: 'feishu',
     name: '飞书',
+    description: '填写 App ID 和 App Secret。',
+    placeholderLabel: 'Token',
+  },
+  {
+    id: 'wecom',
+    name: '企业微信',
+    description: '填写 Bot ID 和 Secret。',
+    placeholderLabel: 'Bot ID',
+    secretLabel: 'Secret',
+  },
+  {
+    id: 'qq',
+    name: 'QQ',
     description: '填写 App ID 和 App Secret。',
     placeholderLabel: 'App ID',
     secretLabel: 'App Secret',
@@ -323,30 +362,9 @@ export const QUICK_SETUP_CHANNEL_PRESETS: QuickSetupChannelPreset[] = [
     placeholderLabel: 'Client ID',
     secretLabel: 'Client Secret',
   },
-  {
-    id: 'telegram',
-    name: 'Telegram',
-    description: '填写 Bot Token。',
-    placeholderLabel: 'Bot Name（可选）',
-    secretLabel: 'Bot Token',
-  },
-  {
-    id: 'discord',
-    name: 'Discord',
-    description: '填写 Bot Token。',
-    placeholderLabel: 'Bot Name（可选）',
-    secretLabel: 'Bot Token',
-  },
-  {
-    id: 'slack',
-    name: 'Slack',
-    description: '填写 Signing Secret 和 Bot Token。',
-    placeholderLabel: 'Signing Secret',
-    secretLabel: 'Bot Token',
-  },
 ]
 
-export const QUICK_SETUP_MANAGED_CHANNEL_IDS: QuickSetupChannelId[] = ['feishu', 'dingtalk', 'telegram', 'discord', 'slack']
+export const QUICK_SETUP_MANAGED_CHANNEL_IDS: QuickSetupChannelId[] = [...QUICK_SETUP_CHANNEL_ORDER]
 
 export const canSkipQuickSetupStep = (stepId: QuickSetupStepId) =>
   stepId === 'model' || stepId === 'channel'
@@ -356,6 +374,25 @@ export const findProviderPreset = (presetId: string) =>
 
 export const findChannelPreset = (channelId: string) =>
   QUICK_SETUP_CHANNEL_PRESETS.find((channel) => channel.id === channelId)
+
+export const createQuickSetupCustomProviderPreset = ({
+  providerName,
+  baseUrl,
+  selectedModelId,
+}: QuickSetupCustomProviderInput): QuickSetupProviderPreset => ({
+  id: 'custom',
+  name: providerName.trim(),
+  displayName: providerName.trim() || '自定义模型',
+  description: '手动填写兼容 OpenAI Completions 的服务商信息与一个主模型。',
+  baseUrl: baseUrl.trim(),
+  isCustom: true,
+  suggestedModels: selectedModelId.trim()
+    ? [{ id: selectedModelId.trim(), name: selectedModelId.trim() }]
+    : [],
+  providerModels: selectedModelId.trim()
+    ? [{ id: selectedModelId.trim(), name: selectedModelId.trim() }]
+    : [],
+})
 
 export const applyQuickSetupModelPreset = (
   config: OpenClawConfig,
@@ -401,7 +438,7 @@ export const clearQuickSetupManagedChannels = (config: OpenClawConfig): OpenClaw
 
   const channelRecord = channels as Record<string, unknown>
   for (const channelId of QUICK_SETUP_MANAGED_CHANNEL_IDS) {
-    delete channelRecord[channelId]
+    delete channelRecord[channelId === 'qq' ? 'qqbot' : channelId]
   }
   delete channelRecord['dingtalk-connector']
 
@@ -414,6 +451,9 @@ export const clearQuickSetupManagedChannels = (config: OpenClawConfig): OpenClaw
 
 const hasNonEmptyString = (value: unknown) => typeof value === 'string' && value.trim().length > 0
 
+const hasConfiguredQqToken = (node: Record<string, unknown>) =>
+  hasNonEmptyString(node.token) || (hasNonEmptyString(node.appId) && hasNonEmptyString(node.clientSecret))
+
 export const sanitizeQuickSetupChannelConfig = (config: OpenClawConfig): OpenClawConfig => {
   const next = cloneConfig(config)
   const channels = next.channels
@@ -423,35 +463,28 @@ export const sanitizeQuickSetupChannelConfig = (config: OpenClawConfig): OpenCla
   }
 
   const channelRecord = channels as Record<string, unknown>
-  const telegram = channelRecord.telegram
-  if (telegram && typeof telegram === 'object' && !Array.isArray(telegram)) {
-    const node = telegram as Record<string, unknown>
-    if (!hasNonEmptyString(node.botToken)) {
-      delete channelRecord.telegram
-    }
-  }
-
-  const discord = channelRecord.discord
-  if (discord && typeof discord === 'object' && !Array.isArray(discord)) {
-    const node = discord as Record<string, unknown>
-    if (!hasNonEmptyString(node.token) && !hasNonEmptyString(node.botToken)) {
-      delete channelRecord.discord
-    }
-  }
-
-  const slack = channelRecord.slack
-  if (slack && typeof slack === 'object' && !Array.isArray(slack)) {
-    const node = slack as Record<string, unknown>
-    if (!hasNonEmptyString(node.signingSecret) || !hasNonEmptyString(node.botToken)) {
-      delete channelRecord.slack
-    }
-  }
 
   const feishu = channelRecord.feishu
   if (feishu && typeof feishu === 'object' && !Array.isArray(feishu)) {
     const node = feishu as Record<string, unknown>
     if (!hasNonEmptyString(node.appId) || !hasNonEmptyString(node.appSecret)) {
       delete channelRecord.feishu
+    }
+  }
+
+  const wecom = channelRecord.wecom
+  if (wecom && typeof wecom === 'object' && !Array.isArray(wecom)) {
+    const node = wecom as Record<string, unknown>
+    if (!hasNonEmptyString(node.botId) || !hasNonEmptyString(node.secret)) {
+      delete channelRecord.wecom
+    }
+  }
+
+  const qqbot = channelRecord.qqbot
+  if (qqbot && typeof qqbot === 'object' && !Array.isArray(qqbot)) {
+    const node = qqbot as Record<string, unknown>
+    if (!hasConfiguredQqToken(node)) {
+      delete channelRecord.qqbot
     }
   }
 
@@ -515,6 +548,37 @@ export const applyQuickSetupGatewayOptions = (
   } else {
     delete next.tools
   }
+
+  const hooksConfig =
+    next.hooks && typeof next.hooks === 'object' && !Array.isArray(next.hooks)
+      ? { ...(next.hooks as Record<string, unknown>) }
+      : {}
+  const internalHooks =
+    hooksConfig.internal && typeof hooksConfig.internal === 'object' && !Array.isArray(hooksConfig.internal)
+      ? { ...(hooksConfig.internal as Record<string, unknown>) }
+      : {}
+  const internalEntries =
+    internalHooks.entries && typeof internalHooks.entries === 'object' && !Array.isArray(internalHooks.entries)
+      ? { ...(internalHooks.entries as Record<string, unknown>) }
+      : {}
+
+  for (const entryId of QUICK_SETUP_INTERNAL_HOOK_ENTRY_IDS) {
+    const existingEntry =
+      internalEntries[entryId] && typeof internalEntries[entryId] === 'object' && !Array.isArray(internalEntries[entryId])
+        ? { ...(internalEntries[entryId] as Record<string, unknown>) }
+        : {}
+    internalEntries[entryId] = {
+      ...existingEntry,
+      enabled: true,
+    }
+  }
+
+  hooksConfig.internal = {
+    ...internalHooks,
+    enabled: true,
+    entries: internalEntries,
+  }
+  next.hooks = hooksConfig
 
   return next
 }

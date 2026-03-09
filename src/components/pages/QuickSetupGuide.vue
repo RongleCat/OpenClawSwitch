@@ -4,7 +4,6 @@ import { invoke } from '@tauri-apps/api/tauri'
 import {
   Bot,
   CheckCircle2,
-  ChevronDown,
   ChevronLeft,
   Loader2,
   MessageSquareMore,
@@ -23,6 +22,7 @@ import {
   applyQuickSetupGatewayOptions,
   applyQuickSetupModelPreset,
   clearQuickSetupManagedChannels,
+  createQuickSetupCustomProviderPreset,
   QUICK_SETUP_CHANNEL_PRESETS,
   QUICK_SETUP_PROVIDER_PRESETS,
   QUICK_SETUP_STEPS,
@@ -43,6 +43,7 @@ import {
   type QuickSetupSessionStatus,
 } from '../../domain/quickSetupSession'
 import { resolveDingtalkChannelNode } from '../../domain/dingtalkPlugin'
+import { getChannelConfigKey, isChannelPluginInstalled, type ChannelPluginStatus } from '../../domain/channelPluginCatalog'
 import type { ConfigFileInfo, ModelSelectionInfo, OpenClawConfig, ProviderInfo } from '../../types/config'
 
 const props = defineProps<{
@@ -55,11 +56,6 @@ const emit = defineEmits<{
   complete: []
   close: []
 }>()
-
-interface ChannelExtensionStatus {
-  feishuInstalled: boolean
-  dingtalkInstalled: boolean
-}
 
 interface ModelOption {
   id: string
@@ -78,11 +74,19 @@ const currentConfig = ref<OpenClawConfig | null>(null)
 const fileInfo = ref<ConfigFileInfo | null>(null)
 const providers = ref<ProviderInfo[]>([])
 const modelSelection = ref<ModelSelectionInfo>({ primary: null, fallbacks: [] })
-const channelExtensionStatus = ref<ChannelExtensionStatus>({ feishuInstalled: false, dingtalkInstalled: false })
+const channelExtensionStatus = ref<ChannelPluginStatus>({
+  feishuInstalled: false,
+  wecomInstalled: false,
+  qqInstalled: false,
+  dingtalkInstalled: false,
+})
 
 const selectedProviderId = ref<QuickSetupProviderId>('dashscope-coding')
 const providerApiKey = ref('')
 const modelQuery = ref('')
+const modelSelectionMode = ref<'auto' | 'manual'>('auto')
+const customProviderName = ref('')
+const customProviderBaseUrl = ref('')
 const fetchedModels = ref<string[]>([])
 const loadingModels = ref(false)
 
@@ -99,6 +103,18 @@ const sessionPersistenceDisabled = ref(false)
 const currentStep = computed(() => QUICK_SETUP_STEPS[stepIndex.value])
 const canRelaunchAsAdmin = computed(() => isAdminRequiredGatewayInstallError(errorMessage.value))
 const currentProviderPreset = computed(() => findProviderPreset(selectedProviderId.value)!)
+const isCustomProvider = computed(() => currentProviderPreset.value.isCustom === true)
+const resolvedProviderName = computed(() =>
+  isCustomProvider.value ? customProviderName.value.trim() : currentProviderPreset.value.name
+)
+const resolvedProviderBaseUrl = computed(() =>
+  isCustomProvider.value ? customProviderBaseUrl.value.trim() : currentProviderPreset.value.baseUrl
+)
+const resolvedProviderDisplayName = computed(() =>
+  isCustomProvider.value
+    ? (customProviderName.value.trim() || currentProviderPreset.value.displayName)
+    : currentProviderPreset.value.displayName
+)
 const currentChannelPreset = computed(
   () => QUICK_SETUP_CHANNEL_PRESETS.find((item) => item.id === selectedChannelId.value) ?? QUICK_SETUP_CHANNEL_PRESETS[0]
 )
@@ -106,12 +122,8 @@ const hasReadyPrimaryModel = computed(() => {
   const primary = modelSelection.value.primary
   return Boolean(primary && !isPrimaryModelPlaceholder(primary))
 })
-const isExtensionChannel = computed(() => selectedChannelId.value === 'feishu' || selectedChannelId.value === 'dingtalk')
-const channelNeedsPrimaryField = computed(() => isExtensionChannel.value || selectedChannelId.value === 'slack')
 const extensionInstalled = computed(() => {
-  if (selectedChannelId.value === 'feishu') return channelExtensionStatus.value.feishuInstalled
-  if (selectedChannelId.value === 'dingtalk') return channelExtensionStatus.value.dingtalkInstalled
-  return true
+  return isChannelPluginInstalled(channelExtensionStatus.value, selectedChannelId.value)
 })
 const modelOptions = computed<ModelOption[]>(() => {
   const unique = new Map<string, ModelOption>()
@@ -137,7 +149,7 @@ const primaryButtonLabel = computed(() => {
   return '安装网关并进入工作台'
 })
 const currentProviderApiKey = computed(() => {
-  const providerName = currentProviderPreset.value.name
+  const providerName = resolvedProviderName.value
   return currentConfig.value?.models?.providers?.[providerName]?.apiKey || ''
 })
 const primaryModelPath = computed(() => modelSelection.value.primary || '')
@@ -147,14 +159,26 @@ const maskSecret = (value: string) => {
   if (trimmed.length <= 8) return trimmed
   return trimmed.slice(0, 4) + '...' + trimmed.slice(-4)
 }
+const parseQqCredentials = (node: Record<string, any>) => {
+  const appId = typeof node.appId === 'string' ? node.appId.trim() : ''
+  const clientSecret = typeof node.clientSecret === 'string' ? node.clientSecret.trim() : ''
+  if (appId || clientSecret) {
+    return { appId, clientSecret }
+  }
+
+  const token = typeof node.token === 'string' ? node.token.trim() : ''
+  if (!token) {
+    return { appId: '', clientSecret: '' }
+  }
+
+  const [legacyAppId, ...secretParts] = token.split(':')
+  return {
+    appId: legacyAppId?.trim() || '',
+    clientSecret: secretParts.join(':').trim(),
+  }
+}
 const selectedChannelSummary = computed(() => {
-  if (isExtensionChannel.value) {
-    return channelIdValue.value.trim() || maskSecret(channelSecretValue.value)
-  }
-  if (selectedChannelId.value === 'slack') {
-    return maskSecret(channelSecretValue.value) || channelIdValue.value.trim()
-  }
-  return maskSecret(channelSecretValue.value)
+  return channelIdValue.value.trim() || maskSecret(channelSecretValue.value)
 })
 const browserProfileStatusText = computed(() =>
   browserDefaultProfileEnabled.value ? '已启用浏览器默认配置' : '未启用'
@@ -185,6 +209,9 @@ const persistQuickSetupSession = (status: QuickSetupSessionStatus = 'in_progress
     selectedProviderId: selectedProviderId.value,
     providerApiKey: providerApiKey.value,
     modelQuery: modelQuery.value,
+    modelSelectionMode: modelSelectionMode.value,
+    customProviderName: customProviderName.value,
+    customProviderBaseUrl: customProviderBaseUrl.value,
     selectedChannelId: selectedChannelId.value,
     channelIdValue: channelIdValue.value,
     channelSecretValue: channelSecretValue.value,
@@ -208,6 +235,9 @@ const restoreQuickSetupSessionState = () => {
     selectedChannelId.value = snapshot.selectedChannelId
     providerApiKey.value = snapshot.providerApiKey
     modelQuery.value = snapshot.modelQuery
+    modelSelectionMode.value = snapshot.modelSelectionMode
+    customProviderName.value = snapshot.customProviderName
+    customProviderBaseUrl.value = snapshot.customProviderBaseUrl
     channelIdValue.value = snapshot.channelIdValue
     channelSecretValue.value = snapshot.channelSecretValue
     browserDefaultProfileEnabled.value = snapshot.browserDefaultProfileEnabled
@@ -273,7 +303,7 @@ const refreshProvidersAndSelection = async () => {
 }
 
 const refreshChannelExtensionStatus = async () => {
-  channelExtensionStatus.value = await invoke<ChannelExtensionStatus>('get_channel_extension_status')
+  channelExtensionStatus.value = await invoke<ChannelPluginStatus>('get_channel_extension_status')
 }
 
 const hydrateDraftsFromConfig = () => {
@@ -287,14 +317,20 @@ const hydrateDraftsFromConfig = () => {
     if (providerConfig?.apiKey) {
       providerApiKey.value = providerConfig.apiKey
     }
-    const matchedPreset = QUICK_SETUP_STEPS && findProviderPreset(selectedProviderId.value)
-    void matchedPreset
     const preset = ['dashscope-coding', 'tencent-coding', 'deepseek', 'dashscope', 'hunyuan']
       .map((id) => findProviderPreset(id))
       .find((item) => item && (item.name === providerName || item.baseUrl === providerConfig?.baseUrl))
     if (preset) {
       selectedProviderId.value = preset.id
       modelQuery.value = modelId || currentProviderPreset.value.suggestedModels[0]?.id || ''
+      modelSelectionMode.value = 'auto'
+      customProviderName.value = ''
+      customProviderBaseUrl.value = ''
+    } else {
+      selectedProviderId.value = 'custom'
+      modelSelectionMode.value = 'manual'
+      customProviderName.value = providerName
+      customProviderBaseUrl.value = providerConfig?.baseUrl || ''
     }
     markStepSaved('model')
   } else if (!modelQuery.value) {
@@ -303,10 +339,9 @@ const hydrateDraftsFromConfig = () => {
 
   const channels = asRecord(currentConfig.value.channels)
   const feishu = asRecord(channels.feishu)
+  const wecom = asRecord(channels.wecom)
+  const qq = asRecord(channels.qqbot)
   const dingtalk = asRecord(resolveDingtalkChannelNode(channels))
-  const telegram = asRecord(channels.telegram)
-  const discord = asRecord(channels.discord)
-  const slack = asRecord(channels.slack)
   const browser = asRecord(currentConfig.value.browser)
   const tools = asRecord(currentConfig.value.tools)
 
@@ -320,28 +355,25 @@ const hydrateDraftsFromConfig = () => {
     markStepSaved('channel')
     return
   }
+  if (wecom.botId && wecom.secret) {
+    selectedChannelId.value = 'wecom'
+    channelIdValue.value = String(wecom.botId)
+    channelSecretValue.value = String(wecom.secret)
+    markStepSaved('channel')
+    return
+  }
+  const qqCredentials = parseQqCredentials(qq)
+  if (qqCredentials.appId && qqCredentials.clientSecret) {
+    selectedChannelId.value = 'qq'
+    channelIdValue.value = qqCredentials.appId
+    channelSecretValue.value = qqCredentials.clientSecret
+    markStepSaved('channel')
+    return
+  }
   if (dingtalk.clientId && dingtalk.clientSecret) {
     selectedChannelId.value = 'dingtalk'
     channelIdValue.value = String(dingtalk.clientId)
     channelSecretValue.value = String(dingtalk.clientSecret)
-    markStepSaved('channel')
-    return
-  }
-  if (telegram.botToken) {
-    selectedChannelId.value = 'telegram'
-    channelSecretValue.value = String(telegram.botToken)
-    markStepSaved('channel')
-    return
-  }
-  if (discord.token) {
-    selectedChannelId.value = 'discord'
-    channelSecretValue.value = String(discord.token)
-    markStepSaved('channel')
-    return
-  }
-  if (slack.botToken) {
-    selectedChannelId.value = 'slack'
-    channelSecretValue.value = String(slack.botToken)
     markStepSaved('channel')
   }
 }
@@ -367,18 +399,24 @@ const ensureDefaultConfigReady = async () => {
 const refreshModels = async () => {
   const apiKey = providerApiKey.value.trim()
   if (!apiKey) {
-    errorMessage.value = '填写 API Key 后才能拉取模型列表'
+    infoMessage.value = '填写 API Key 后可自动拉取模型列表，也可以直接手动填写模型 ID。'
+    return
+  }
+  const baseUrl = resolvedProviderBaseUrl.value
+  if (!baseUrl) {
+    infoMessage.value = '请先填写服务商 Base URL，再尝试自动拉取模型列表。'
     return
   }
   loadingModels.value = true
   errorMessage.value = ''
+  infoMessage.value = ''
   try {
     fetchedModels.value = await invoke<string[]>('fetch_provider_models', {
-      baseUrl: currentProviderPreset.value.baseUrl,
+      baseUrl,
       apiKey,
     })
   } catch (error) {
-    errorMessage.value = `模型列表拉取失败：${error}`
+    infoMessage.value = `模型列表暂时没有自动拉取到：${error}。你可以继续手动填写模型 ID。`
   } finally {
     loadingModels.value = false
   }
@@ -393,14 +431,24 @@ const saveModelStep = async () => {
 
   setBusy('正在写入模型配置...')
   try {
-    const preset = currentProviderPreset.value
+    const preset = isCustomProvider.value
+      ? createQuickSetupCustomProviderPreset({
+          providerName: customProviderName.value,
+          baseUrl: customProviderBaseUrl.value,
+          selectedModelId: modelId,
+        })
+      : currentProviderPreset.value
+    if (isCustomProvider.value) {
+      if (!customProviderName.value.trim()) throw new Error('请先填写自定义服务商名称')
+      if (!customProviderBaseUrl.value.trim()) throw new Error('请先填写自定义服务商 Base URL')
+    }
     const nextConfig = applyQuickSetupModelPreset(currentConfig.value, preset, apiKey, modelId)
 
     currentConfig.value = nextConfig
     await saveConfigToDisk()
     await refreshProvidersAndSelection()
     markStepSaved('model')
-    infoMessage.value = `主模型已更新为 ${preset.displayName} / ${modelId}`
+    infoMessage.value = `主模型已更新为 ${resolvedProviderDisplayName.value} / ${modelId}`
     props.showToast('success', '模型配置已保存')
     moveNext()
   } finally {
@@ -409,60 +457,20 @@ const saveModelStep = async () => {
 }
 
 const ensureSelectedChannelExtension = async () => {
-  if (!isExtensionChannel.value || extensionInstalled.value) return
+  if (extensionInstalled.value) return
   await invoke<string>('install_channel_extension', { channelId: selectedChannelId.value })
   await refreshChannelExtensionStatus()
 }
 
-const ensureGenericChannelNode = (channelId: 'telegram' | 'discord' | 'slack') => {
+const ensureQuickSetupChannelNode = (channelId: QuickSetupChannelId) => {
   if (!currentConfig.value) throw new Error('配置文件未加载')
   const root = asRecord(currentConfig.value)
   const channels = asRecord(root.channels)
   root.channels = channels
-  const node = asRecord(channels[channelId])
-  channels[channelId] = node
+  const configKey = getChannelConfigKey(channelId)
+  const node = asRecord(channels[configKey])
+  channels[configKey] = node
   return node
-}
-
-const saveGenericChannel = async () => {
-  const secret = channelSecretValue.value.trim()
-  const primaryField = channelIdValue.value.trim()
-  if (!secret) throw new Error(`${currentChannelPreset.value.secretLabel} 不能为空`)
-  if (!currentConfig.value) throw new Error('配置文件未加载')
-
-  if (selectedChannelId.value === 'telegram') {
-    const node = ensureGenericChannelNode('telegram')
-    node.enabled = true
-    node.botToken = secret
-    node.dmPolicy ??= 'pairing'
-    node.groupPolicy ??= 'allowlist'
-    node.replyToMode ??= 'off'
-  }
-
-  if (selectedChannelId.value === 'discord') {
-    const node = ensureGenericChannelNode('discord')
-    node.enabled = true
-    node.token = secret
-    node.dm ??= { policy: 'pairing' }
-    node.groupPolicy ??= 'allowlist'
-    node.replyToMode ??= 'off'
-  }
-
-  if (selectedChannelId.value === 'slack') {
-    const node = ensureGenericChannelNode('slack')
-    if (!primaryField) throw new Error('Signing Secret 不能为空')
-    node.enabled = true
-    node.botToken = secret
-    node.signingSecret = primaryField
-    node.mode ??= 'http'
-    node.webhookPath ??= '/webhooks/slack'
-    node.dmPolicy ??= 'pairing'
-    node.groupPolicy ??= 'allowlist'
-    node.replyToMode ??= 'off'
-    node.requireMention ??= true
-  }
-
-  await saveConfigToDisk()
 }
 
 const resetManagedQuickSetupChannels = async () => {
@@ -496,8 +504,30 @@ const saveChannelStep = async () => {
         clientSecret,
         enabled: true,
       })
+    } else if (selectedChannelId.value === 'wecom') {
+      const botId = channelIdValue.value.trim()
+      const secret = channelSecretValue.value.trim()
+      if (!botId || !secret) throw new Error('请填写完整的企业微信 Bot ID 与 Secret')
+      await ensureSelectedChannelExtension()
+      const node = ensureQuickSetupChannelNode('wecom')
+      node.enabled = true
+      node.botId = botId
+      node.secret = secret
+      await saveConfigToDisk()
+    } else if (selectedChannelId.value === 'qq') {
+      const appId = channelIdValue.value.trim()
+      const clientSecret = channelSecretValue.value.trim()
+      if (!appId || !clientSecret) throw new Error('请填写完整的 QQ App ID 与 App Secret')
+      await ensureSelectedChannelExtension()
+      const node = ensureQuickSetupChannelNode('qq')
+      node.enabled = true
+      node.appId = appId
+      node.clientSecret = clientSecret
+      delete node.token
+      delete node.clientSecretFile
+      await saveConfigToDisk()
     } else {
-      await saveGenericChannel()
+      throw new Error(`暂不支持的快速引导渠道：${selectedChannelId.value}`)
     }
 
     await loadConfig()
@@ -609,9 +639,13 @@ const handlePrimaryAction = async () => {
 
 watch(selectedProviderId, () => {
   fetchedModels.value = []
-  const providerName = currentProviderPreset.value.name
+  const providerName = isCustomProvider.value ? customProviderName.value.trim() : currentProviderPreset.value.name
   providerApiKey.value = currentConfig.value?.models?.providers?.[providerName]?.apiKey || ''
-  modelQuery.value = currentProviderPreset.value.suggestedModels[0]?.id || ''
+  if (isCustomProvider.value) {
+    modelSelectionMode.value = 'manual'
+  } else {
+    modelQuery.value = currentProviderPreset.value.suggestedModels[0]?.id || modelQuery.value
+  }
 })
 
 watch(selectedChannelId, () => {
@@ -627,6 +661,9 @@ watch(
     selectedProviderId,
     providerApiKey,
     modelQuery,
+    modelSelectionMode,
+    customProviderName,
+    customProviderBaseUrl,
     selectedChannelId,
     channelIdValue,
     channelSecretValue,
@@ -735,75 +772,153 @@ onMounted(async () => {
         </div>
 
         <div class="mt-5 flex min-h-0 flex-1 flex-col">
-          <div v-if="currentStep.id === 'model'" class="grid min-h-0 flex-1 gap-4 xl:grid-cols-[minmax(0,280px),minmax(0,1fr),minmax(0,1fr)]">
+          <div v-if="currentStep.id === 'model'" class="grid min-h-0 flex-1 gap-4 xl:grid-cols-[260px,minmax(0,1fr)]">
             <div class="rounded-[18px] border p-4" style="border-color: color-mix(in srgb, var(--oc-accent) 10%, var(--oc-card-border)); background: var(--oc-card);">
-              <label class="mb-2 block text-sm font-medium" style="color: var(--oc-text-secondary);">预设服务商</label>
-              <div class="relative">
-                <select
-                  v-model="selectedProviderId"
-                  class="oc-input w-full appearance-none pr-10"
-                  aria-label="选择预设服务商"
-                >
-                  <option
-                    v-for="preset in QUICK_SETUP_PROVIDER_PRESETS"
-                    :key="preset.id"
-                    :value="preset.id"
-                  >
-                    {{ preset.displayName }}
-                  </option>
-                </select>
-                <ChevronDown class="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2" style="color: var(--oc-text-muted);" />
+              <div class="flex items-center justify-between gap-3">
+                <p class="text-sm font-medium" style="color: var(--oc-text-primary);">模型服务商</p>
+                <span class="rounded-full px-2 py-0.5 text-[11px]" style="background: color-mix(in srgb, var(--oc-accent-soft) 55%, transparent); color: var(--oc-accent);">
+                  {{ QUICK_SETUP_PROVIDER_PRESETS.length }} 个选项
+                </span>
               </div>
-              <p class="mt-3 text-sm font-medium" style="color: var(--oc-text-primary);">{{ currentProviderPreset.displayName }}</p>
-              <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-secondary);">{{ currentProviderPreset.description }}</p>
-              <p class="mt-3 break-all text-[11px] leading-5" style="color: var(--oc-text-muted);">{{ currentProviderPreset.baseUrl }}</p>
-            </div>
+              <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-secondary);">左侧只负责选择服务商，右侧统一填写 API Key、模型方式和主模型。</p>
 
-            <div class="rounded-[18px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
-              <label class="mb-2 block text-sm font-medium" style="color: var(--oc-text-secondary);">API Key</label>
-              <Input v-model="providerApiKey" type="password" placeholder="输入服务商 API Key" autocomplete="off" />
-              <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-muted);">
-                当前配置页中同名服务商的 Key 也会在这里复用：{{ currentProviderApiKey ? '已检测到已有 Key' : '未检测到' }}
-              </p>
-            </div>
-
-            <div class="rounded-[18px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
-              <div class="mb-2 flex items-center justify-between gap-3">
-                <label class="block text-sm font-medium" style="color: var(--oc-text-secondary);">模型 ID / 名称</label>
-                <button type="button" class="oc-toolbar-btn h-8 px-3 text-xs" :disabled="loadingModels || busy" @click="refreshModels">
-                  <Loader2 v-if="loadingModels" class="h-3.5 w-3.5 animate-spin" />
-                  <RefreshCw v-else class="h-3.5 w-3.5" />
-                  刷新列表
+              <div class="mt-4 max-h-[420px] space-y-2 overflow-y-auto pr-1">
+                <button
+                  v-for="preset in QUICK_SETUP_PROVIDER_PRESETS"
+                  :key="preset.id"
+                  type="button"
+                  class="w-full rounded-[14px] border px-4 py-3 text-left transition-all"
+                  :style="{
+                    borderColor: selectedProviderId === preset.id ? 'var(--oc-card-border-strong)' : 'var(--oc-card-border)',
+                    background: selectedProviderId === preset.id ? 'var(--oc-item-active)' : 'var(--oc-card-elevated)',
+                  }"
+                  @click="selectedProviderId = preset.id"
+                >
+                  <div class="flex items-start justify-between gap-3">
+                    <div class="min-w-0 flex-1">
+                      <p class="text-sm font-semibold" style="color: var(--oc-text-primary);">{{ preset.displayName }}</p>
+                      <p class="mt-1 text-xs leading-5" style="color: var(--oc-text-secondary);">{{ preset.description }}</p>
+                    </div>
+                    <span v-if="preset.isCustom" class="rounded-full px-2 py-0.5 text-[11px]" style="background: color-mix(in srgb, var(--oc-warning) 16%, transparent); color: var(--oc-warning);">
+                      自定义
+                    </span>
+                  </div>
                 </button>
               </div>
-              <input
-                v-model="modelQuery"
-                class="oc-input w-full"
-                list="quick-setup-model-options"
-                placeholder="搜索模型或直接输入模型 ID"
-                autocomplete="off"
-              />
-              <datalist id="quick-setup-model-options">
-                <option
-                  v-for="item in filteredModelOptions"
-                  :key="item.id"
-                  :value="item.id"
-                  :label="item.name"
-                >{{ item.name }}</option>
-              </datalist>
-              <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-muted);">支持直接输入自定义模型 ID；刷新后可从系统返回列表中快速选择。</p>
+            </div>
+
+            <div class="min-h-0 overflow-y-auto pr-1">
+              <div class="space-y-4">
+                <div class="rounded-[18px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
+                  <div class="flex items-start justify-between gap-4">
+                    <div>
+                      <p class="text-sm font-semibold" style="color: var(--oc-text-primary);">{{ resolvedProviderDisplayName }}</p>
+                      <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-secondary);">{{ currentProviderPreset.description }}</p>
+                    </div>
+                    <span class="rounded-full px-2 py-0.5 text-[11px]" style="background: color-mix(in srgb, var(--oc-card) 90%, transparent); color: var(--oc-text-muted);">
+                      {{ isCustomProvider ? '手动配置' : '预设服务商' }}
+                    </span>
+                  </div>
+                  <p v-if="!isCustomProvider" class="mt-3 text-xs leading-5" style="color: var(--oc-text-muted);">预设服务商的 Base URL 已内置，不需要在快速引导中额外填写。</p>
+                </div>
+
+                <div v-if="isCustomProvider" class="rounded-[18px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
+                  <div class="grid gap-4 lg:grid-cols-2">
+                    <div>
+                      <label class="mb-2 block text-sm font-medium" style="color: var(--oc-text-secondary);">服务商名称</label>
+                      <Input v-model="customProviderName" placeholder="例如 custom-openai" autocomplete="off" />
+                    </div>
+                    <div>
+                      <label class="mb-2 block text-sm font-medium" style="color: var(--oc-text-secondary);">Base URL</label>
+                      <Input v-model="customProviderBaseUrl" placeholder="https://example.com/v1" autocomplete="off" />
+                    </div>
+                  </div>
+                </div>
+
+                <div class="rounded-[18px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
+                  <label class="mb-2 block text-sm font-medium" style="color: var(--oc-text-secondary);">API Key</label>
+                  <Input v-model="providerApiKey" type="password" placeholder="输入服务商 API Key" autocomplete="off" />
+                  <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-muted);">
+                    同名服务商已存在时，这里会自动复用已保存的 Key：{{ currentProviderApiKey ? '已检测到已有 Key' : '未检测到' }}
+                  </p>
+                </div>
+
+                <div class="rounded-[18px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
+                  <label class="mb-2 block text-sm font-medium" style="color: var(--oc-text-secondary);">模型选择方式</label>
+                  <div class="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      class="oc-toolbar-btn h-9 px-3 text-sm"
+                      :style="modelSelectionMode === 'auto' ? { background: 'var(--oc-item-active)', borderColor: 'var(--oc-card-border-strong)', color: 'var(--oc-text-primary)' } : undefined"
+                      @click="modelSelectionMode = 'auto'"
+                    >
+                      自动请求
+                    </button>
+                    <button
+                      type="button"
+                      class="oc-toolbar-btn h-9 px-3 text-sm"
+                      :style="modelSelectionMode === 'manual' ? { background: 'var(--oc-item-active)', borderColor: 'var(--oc-card-border-strong)', color: 'var(--oc-text-primary)' } : undefined"
+                      @click="modelSelectionMode = 'manual'"
+                    >
+                      手动填写
+                    </button>
+                  </div>
+                  <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-muted);">
+                    自动请求失败不会中断快速引导，你仍然可以直接手动填写主模型 ID。
+                  </p>
+                </div>
+
+                <div class="rounded-[18px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
+                  <div class="mb-2 flex items-center justify-between gap-3">
+                    <label class="block text-sm font-medium" style="color: var(--oc-text-secondary);">主模型</label>
+                    <button
+                      v-if="modelSelectionMode === 'auto'"
+                      type="button"
+                      class="oc-toolbar-btn h-8 px-3 text-xs"
+                      :disabled="loadingModels || busy"
+                      @click="refreshModels"
+                    >
+                      <Loader2 v-if="loadingModels" class="h-3.5 w-3.5 animate-spin" />
+                      <RefreshCw v-else class="h-3.5 w-3.5" />
+                      获取模型
+                    </button>
+                  </div>
+                  <input
+                    v-model="modelQuery"
+                    class="oc-input w-full"
+                    :list="modelSelectionMode === 'auto' ? 'quick-setup-model-options' : undefined"
+                    :placeholder="modelSelectionMode === 'auto' ? '可搜索自动返回的模型，或直接输入模型 ID' : '直接输入主模型 ID，例如 gpt-4.1'"
+                    autocomplete="off"
+                  />
+                  <datalist v-if="modelSelectionMode === 'auto'" id="quick-setup-model-options">
+                    <option
+                      v-for="item in filteredModelOptions"
+                      :key="item.id"
+                      :value="item.id"
+                      :label="item.name"
+                    >{{ item.name }}</option>
+                  </datalist>
+                  <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-muted);">
+                    {{ modelSelectionMode === 'auto'
+                      ? '自动模式会尝试读取服务商返回的模型列表；列表为空时仍可继续手动填写。'
+                      : '快速引导只保存一个主模型，不额外创建备用模型。' }}
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
 
-          <div v-else-if="currentStep.id === 'channel'" class="grid min-h-0 flex-1 gap-4 xl:grid-cols-[minmax(0,1.05fr),minmax(0,1fr)]">
+          <div v-else-if="currentStep.id === 'channel'" class="grid min-h-0 flex-1 gap-4 xl:grid-cols-[260px,minmax(0,1fr)]">
             <div class="rounded-[18px] border p-4" style="border-color: color-mix(in srgb, var(--oc-accent) 10%, var(--oc-card-border)); background: var(--oc-card);">
-              <p class="mb-3 text-sm font-medium" style="color: var(--oc-text-primary);">选择通信渠道</p>
-              <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              <p class="text-sm font-medium" style="color: var(--oc-text-primary);">通信渠道</p>
+              <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-secondary);">按飞书、企业微信、QQ、钉钉的顺序排布，保存时会校验并自动安装对应插件。</p>
+
+              <div class="mt-4 max-h-[420px] space-y-2 overflow-y-auto pr-1">
                 <button
                   v-for="channel in QUICK_SETUP_CHANNEL_PRESETS"
                   :key="channel.id"
                   type="button"
-                  class="rounded-[16px] border p-4 text-left transition-all"
+                  class="w-full rounded-[14px] border px-4 py-3 text-left transition-all"
                   :style="{
                     borderColor: selectedChannelId === channel.id ? 'var(--oc-card-border-strong)' : 'var(--oc-card-border)',
                     background: selectedChannelId === channel.id ? 'var(--oc-item-active)' : 'var(--oc-card-elevated)',
@@ -812,8 +927,8 @@ onMounted(async () => {
                 >
                   <div class="flex items-center justify-between gap-3">
                     <p class="text-sm font-semibold" style="color: var(--oc-text-primary);">{{ channel.name }}</p>
-                    <span v-if="channel.id === 'feishu' || channel.id === 'dingtalk'" class="rounded-full px-2 py-0.5 text-[11px]" style="background: color-mix(in srgb, var(--oc-card) 88%, transparent); color: var(--oc-text-muted);">
-                      {{ channel.id === 'feishu' ? (channelExtensionStatus.feishuInstalled ? '已安装扩展' : '待安装扩展') : (channelExtensionStatus.dingtalkInstalled ? '已安装扩展' : '待安装扩展') }}
+                    <span class="rounded-full px-2 py-0.5 text-[11px]" style="background: color-mix(in srgb, var(--oc-card) 88%, transparent); color: var(--oc-text-muted);">
+                      {{ isChannelPluginInstalled(channelExtensionStatus, channel.id) ? '已安装插件' : '待安装插件' }}
                     </span>
                   </div>
                   <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-secondary);">{{ channel.description }}</p>
@@ -821,21 +936,42 @@ onMounted(async () => {
               </div>
             </div>
 
-            <div class="grid gap-4 lg:grid-rows-2">
-              <div class="rounded-[16px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
-                <label class="mb-2 block text-sm font-medium" style="color: var(--oc-text-secondary);">{{ currentChannelPreset.placeholderLabel }}</label>
-                <Input
-                  v-model="channelIdValue"
-                  :disabled="!channelNeedsPrimaryField"
-                  :placeholder="channelNeedsPrimaryField ? currentChannelPreset.placeholderLabel : '该渠道无需填写此项'"
-                />
-                <p class="mt-2 text-xs" style="color: var(--oc-text-muted);">{{ currentChannelPreset.description }}</p>
-              </div>
+            <div class="min-h-0 overflow-y-auto pr-1">
+              <div class="space-y-4">
+                <div class="rounded-[18px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
+                  <div class="flex items-start justify-between gap-4">
+                    <div>
+                      <p class="text-sm font-semibold" style="color: var(--oc-text-primary);">{{ currentChannelPreset.name }}</p>
+                      <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-secondary);">{{ currentChannelPreset.description }}</p>
+                    </div>
+                    <span class="rounded-full px-2 py-0.5 text-[11px]" style="background: color-mix(in srgb, var(--oc-card) 88%, transparent); color: var(--oc-text-muted);">
+                      {{ extensionInstalled ? '保存时直接写入配置' : '保存时自动安装插件' }}
+                    </span>
+                  </div>
+                </div>
 
-              <div class="rounded-[16px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
-                <label class="mb-2 block text-sm font-medium" style="color: var(--oc-text-secondary);">{{ currentChannelPreset.secretLabel }}</label>
-                <Input v-model="channelSecretValue" type="password" :placeholder="`输入${currentChannelPreset.secretLabel}`" autocomplete="off" />
-                <p class="mt-2 text-xs" style="color: var(--oc-text-muted);">仅写入当前选择且已填写的渠道配置。</p>
+                <div class="rounded-[18px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
+                  <label class="mb-2 block text-sm font-medium" style="color: var(--oc-text-secondary);">{{ currentChannelPreset.placeholderLabel }}</label>
+                  <Input
+                    v-model="channelIdValue"
+                    type="text"
+                    :placeholder="`输入${currentChannelPreset.placeholderLabel}`"
+                    autocomplete="off"
+                  />
+                  <p v-if="selectedChannelId === 'qq'" class="mt-2 text-xs leading-5" style="color: var(--oc-text-muted);">
+                    QQ 渠道会分别写入 <code>channels.qqbot.appId</code> 与 <code>channels.qqbot.clientSecret</code>。
+                  </p>
+                </div>
+
+                <div
+                  v-if="currentChannelPreset.secretLabel"
+                  class="rounded-[18px] border p-4"
+                  style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);"
+                >
+                  <label class="mb-2 block text-sm font-medium" style="color: var(--oc-text-secondary);">{{ currentChannelPreset.secretLabel }}</label>
+                  <Input v-model="channelSecretValue" type="password" :placeholder="`输入${currentChannelPreset.secretLabel}`" autocomplete="off" />
+                  <p class="mt-2 text-xs leading-5" style="color: var(--oc-text-muted);">快速引导只写入当前选中的一个通信渠道，其他快速引导渠道会被清理掉，避免网关启动时混入残留配置。</p>
+                </div>
               </div>
             </div>
           </div>
