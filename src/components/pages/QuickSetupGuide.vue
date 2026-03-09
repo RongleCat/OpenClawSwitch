@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/tauri'
 import {
   Bot,
@@ -23,6 +23,7 @@ import {
   buildQuickSetupModelOptions,
   clearQuickSetupManagedChannels,
   createQuickSetupCustomProviderPreset,
+  filterQuickSetupModelOptions,
   QUICK_SETUP_CHANNEL_PRESETS,
   QUICK_SETUP_PROVIDER_PRESETS,
   QUICK_SETUP_STEPS,
@@ -87,6 +88,7 @@ const customProviderBaseUrl = ref('')
 const fetchedModels = ref<string[]>([])
 const loadingModels = ref(false)
 const modelOptionsRequestKey = ref('')
+const showModelDropdown = ref(false)
 
 const selectedChannelId = ref<QuickSetupChannelId>('feishu')
 const channelIdValue = ref('')
@@ -122,20 +124,37 @@ const extensionInstalled = computed(() => {
 })
 const modelOptions = computed<QuickSetupModelOption[]>(() =>
   buildQuickSetupModelOptions({
+    presetModels: currentProviderPreset.value.providerModels,
     fetchedModels: fetchedModels.value,
     modelQuery: modelQuery.value,
   })
 )
-const hasFetchedModelOptions = computed(() => fetchedModels.value.some((item) => item.trim().length > 0))
+const filteredModelOptions = computed<QuickSetupModelOption[]>(() =>
+  filterQuickSetupModelOptions(modelOptions.value, modelQuery.value)
+)
+const hasModelOptions = computed(() => modelOptions.value.length > 0)
+const shouldShowModelDropdown = computed(() =>
+  showModelDropdown.value && (loadingModels.value || hasModelOptions.value || modelQuery.value.trim().length > 0)
+)
 const modelInputPlaceholder = computed(() => {
   const suggestedId = currentProviderPreset.value.suggestedModels[0]?.id
   return suggestedId ? `输入模型 ID，例如 ${suggestedId}` : '输入模型 ID，例如 gpt-4.1'
 })
 const currentModelOptionsRequestKey = computed(() => {
+  if (currentProviderPreset.value.skipModelFetch) return ''
   const apiKey = providerApiKey.value.trim()
   const baseUrl = resolvedProviderBaseUrl.value.trim()
   if (!apiKey || !baseUrl) return ''
   return `${selectedProviderId.value}::${baseUrl}::${apiKey}`
+})
+const modelOptionBadgeLabel = computed(() => {
+  if (loadingModels.value) return '正在读取列表'
+  if (currentProviderPreset.value.skipModelFetch) {
+    return currentProviderPreset.value.providerModels.length > 0
+      ? `${currentProviderPreset.value.providerModels.length} 个预设`
+      : '预设模型'
+  }
+  return hasModelOptions.value ? `${modelOptions.value.length} 个候选` : '自动读取'
 })
 const primaryButtonLabel = computed(() => {
   if (busy.value) return busyMessage.value || '处理中...'
@@ -258,6 +277,11 @@ const clearBusy = () => {
   busyMessage.value = ''
 }
 
+const selectModelFromDropdown = (modelId: string) => {
+  modelQuery.value = modelId
+  showModelDropdown.value = false
+}
+
 const moveNext = () => {
   if (stepIndex.value < QUICK_SETUP_STEPS.length - 1) {
     stepIndex.value += 1
@@ -308,7 +332,7 @@ const hydrateDraftsFromConfig = () => {
     if (providerConfig?.apiKey) {
       providerApiKey.value = providerConfig.apiKey
     }
-    const preset = ['dashscope-coding', 'tencent-coding', 'deepseek', 'dashscope', 'hunyuan']
+    const preset = ['dashscope-coding', 'tencent-coding', 'deepseek', 'dashscope', 'siliconflow']
       .map((id) => findProviderPreset(id))
       .find((item) => item && (item.name === providerName || item.baseUrl === providerConfig?.baseUrl))
     if (preset) {
@@ -420,6 +444,11 @@ const ensureModelOptionsLoaded = async () => {
   const requestKey = currentModelOptionsRequestKey.value
   if (!requestKey || loadingModels.value || modelOptionsRequestKey.value === requestKey) return
   await refreshModels({ silent: true })
+}
+
+const openModelDropdown = async () => {
+  showModelDropdown.value = true
+  await ensureModelOptionsLoaded()
 }
 
 const saveModelStep = async () => {
@@ -643,6 +672,7 @@ const handlePrimaryAction = async () => {
 watch(selectedProviderId, () => {
   fetchedModels.value = []
   modelOptionsRequestKey.value = ''
+  showModelDropdown.value = false
   const providerName = isCustomProvider.value ? customProviderName.value.trim() : currentProviderPreset.value.name
   providerApiKey.value = currentConfig.value?.models?.providers?.[providerName]?.apiKey || ''
   if (isCustomProvider.value) {
@@ -663,6 +693,13 @@ watch(selectedChannelId, () => {
   channelSecretValue.value = ''
   errorMessage.value = ''
 })
+
+const handleClickOutside = (event: MouseEvent) => {
+  const target = event.target as HTMLElement | null
+  if (!target?.closest('.quick-setup-model-dropdown-container')) {
+    showModelDropdown.value = false
+  }
+}
 
 watch(
   [
@@ -687,6 +724,7 @@ watch(
 )
 
 onMounted(async () => {
+  document.addEventListener('click', handleClickOutside)
   setBusy('正在准备快速引导...')
   try {
     await ensureDefaultConfigReady()
@@ -696,6 +734,10 @@ onMounted(async () => {
   } finally {
     clearBusy()
   }
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('click', handleClickOutside)
 })
 </script>
 
@@ -847,26 +889,41 @@ onMounted(async () => {
                   <div class="mb-2 flex items-center justify-between gap-3">
                     <label class="block text-sm font-medium" style="color: var(--oc-text-secondary);">主模型</label>
                     <span class="rounded-full px-2 py-0.5 text-[11px]" style="background: color-mix(in srgb, var(--oc-card) 88%, transparent); color: var(--oc-text-muted);">
-                      {{ loadingModels ? '正在读取列表' : hasFetchedModelOptions ? `${fetchedModels.length} 个候选` : '自动读取' }}
+                      {{ modelOptionBadgeLabel }}
                     </span>
                   </div>
-                  <input
-                    v-model="modelQuery"
-                    class="oc-input w-full"
-                    :list="hasFetchedModelOptions ? 'quick-setup-model-options' : undefined"
-                    :placeholder="modelInputPlaceholder"
-                    autocomplete="off"
-                    @focus="() => { void ensureModelOptionsLoaded() }"
-                    @click="() => { void ensureModelOptionsLoaded() }"
-                  />
-                  <datalist v-if="hasFetchedModelOptions" id="quick-setup-model-options">
-                    <option
-                      v-for="item in modelOptions"
-                      :key="item.id"
-                      :value="item.id"
-                      :label="item.name"
-                    >{{ item.name }}</option>
-                  </datalist>
+                  <div class="relative quick-setup-model-dropdown-container">
+                    <Input
+                      v-model="modelQuery"
+                      :placeholder="modelInputPlaceholder"
+                      autocomplete="off"
+                      autocorrect="off"
+                      autocapitalize="off"
+                      spellcheck="false"
+                      lang="en"
+                      @focus="() => { void openModelDropdown() }"
+                      @click="() => { void openModelDropdown() }"
+                    />
+                    <div
+                      v-if="shouldShowModelDropdown"
+                      class="oc-dropdown-menu absolute inset-x-0 top-full z-10 mt-1 max-h-48 overflow-auto"
+                      @click.stop
+                    >
+                      <div v-if="loadingModels" class="oc-dropdown-empty">加载中...</div>
+                      <template v-else>
+                        <button
+                          v-for="item in filteredModelOptions"
+                          :key="item.id"
+                          type="button"
+                          class="oc-dropdown-item cursor-pointer text-sm"
+                          @click="selectModelFromDropdown(item.id)"
+                        >
+                          {{ item.name }}
+                        </button>
+                        <p v-if="filteredModelOptions.length === 0" class="oc-dropdown-empty">无匹配结果</p>
+                      </template>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
