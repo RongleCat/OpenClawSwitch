@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   resolveGateTopbarTitle,
-  shouldRenderQuickSetupCloseAction,
   shouldRenderQuickSetupGuide,
   shouldRenderSidebar,
   shouldUseFixedGateInstallLayout,
@@ -57,13 +56,5 @@ describe('shouldRenderSidebar', () => {
     expect(shouldRenderSidebar(false, false)).toBe(true)
     expect(shouldRenderSidebar(true, false)).toBe(false)
     expect(shouldRenderSidebar(false, true)).toBe(false)
-  })
-})
-
-describe('shouldRenderQuickSetupCloseAction', () => {
-  it('shows close only for manual settings-entry quick setup', () => {
-    expect(shouldRenderQuickSetupCloseAction(false, true)).toBe(true)
-    expect(shouldRenderQuickSetupCloseAction(true, true)).toBe(false)
-    expect(shouldRenderQuickSetupCloseAction(false, false)).toBe(false)
   })
 })

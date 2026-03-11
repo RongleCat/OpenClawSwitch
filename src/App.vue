@@ -30,7 +30,6 @@ import { isPrimaryModelPlaceholder } from './domain/configValidation'
 import { shouldShowDashboardButton } from './domain/dashboardVisibility'
 import {
   resolveGateTopbarTitle,
-  shouldRenderQuickSetupCloseAction,
   shouldRenderQuickSetupGuide,
   shouldRenderSidebar,
   shouldUseFixedMainContentLayout,
@@ -80,6 +79,8 @@ const showEnvDropdown = ref(false)
 const showSshModal = ref(false)
 const showFingerprintDialog = ref(false)
 const sshConnected = ref(false)
+const sshAutoConnecting = ref(false)
+const sshAutoConnectReject = ref<(() => void) | null>(null)
 const sshFingerprint = ref<FingerprintInfo | null>(null)
 const sshFingerprintCallback = ref<(() => void) | null>(null)
 const themeStorageKey = 'openclawswitch.theme.mode'
@@ -88,8 +89,10 @@ const isWindows = navigator.userAgent.toLowerCase().includes('windows')
 const themeMode = ref<ThemeMode>('system')
 const themeModeCycle: ThemeMode[] = ['system', 'light', 'dark']
 const browserDefaultProfileEnabled = ref(false)
+const toolsFullProfileEnabled = ref(false)
 const browserSettingLoading = ref(false)
 const browserSettingSaving = ref(false)
+const toolsProfileSaving = ref(false)
 const browserSettingError = ref('')
 const browserSettingPath = ref('')
 const browserSettingReady = ref(false)
@@ -111,7 +114,6 @@ const environmentRefreshing = ref(false)
 const loading = ref(false)
 const loadingMessage = ref('加载中...')
 const activeNav = ref<NavPage>('overview')
-const quickSetupDebugOpen = ref(false)
 const quickSetupResumePending = ref(Boolean(loadQuickSetupSession()))
 
 const toast = ref<{ type: 'success' | 'error'; message: string } | null>(null)
@@ -194,13 +196,10 @@ const navMeta: Record<NavPage, { title: string; subtitle: string }> = {
 }
 
 const pageMeta = computed(() => navMeta[activeNav.value])
-const quickSetupForcedOpen = computed(() => quickSetupDebugOpen.value || quickSetupResumePending.value)
+const quickSetupForcedOpen = computed(() => quickSetupResumePending.value)
 const shouldShowSidebar = computed(() => shouldRenderSidebar(isGateActive.value, quickSetupForcedOpen.value))
-const shouldShowQuickSetupCloseAction = computed(() =>
-  shouldRenderQuickSetupCloseAction(isGateActive.value, quickSetupDebugOpen.value)
-)
 const topbarTitle = computed(() => {
-  if (quickSetupForcedOpen.value) return '安装与接入 · 快速引导调试'
+  if (quickSetupForcedOpen.value) return '安装与接入 · 快速引导恢复'
   if (!isGateActive.value) return pageMeta.value.title
   return resolveGateTopbarTitle(gateState.value, targetMode.value)
 })
@@ -254,6 +253,17 @@ const browserSettingStatusText = computed(() => {
 })
 const browserSettingSwitchDisabled = computed(() => {
   if (browserSettingLoading.value || browserSettingSaving.value) return true
+  if (!openclawInstalled.value) return true
+  if (currentEnv.value.mode === 'ssh' && !sshConnected.value) return true
+  return !browserSettingReady.value
+})
+const toolsProfileStatusText = computed(() => {
+  if (browserSettingLoading.value) return '加载中'
+  if (toolsProfileSaving.value) return '保存中'
+  return toolsFullProfileEnabled.value ? '已开启' : '已关闭'
+})
+const toolsProfileSwitchDisabled = computed(() => {
+  if (browserSettingLoading.value || toolsProfileSaving.value) return true
   if (!openclawInstalled.value) return true
   if (currentEnv.value.mode === 'ssh' && !sshConnected.value) return true
   return !browserSettingReady.value
@@ -567,7 +577,6 @@ const checkEnvironment = async () => {
     if (envStatus.value && shouldClearQuickSetupSessionForEnvironment(currentEnv.value.mode, envStatus.value.openclaw.installed)) {
       clearQuickSetupSession()
       quickSetupResumePending.value = false
-      quickSetupDebugOpen.value = false
     }
 
     await syncConfigSignals()
@@ -626,17 +635,9 @@ const navigateTo = (target: NavPage) => {
   }
 
   if (target !== 'overview') {
-    quickSetupDebugOpen.value = false
+    quickSetupResumePending.value = false
   }
   activeNav.value = target
-}
-
-const openQuickSetupDebug = async () => {
-  targetMode.value = 'local'
-  quickSetupDebugOpen.value = true
-  if (!envStatus.value) {
-    await checkEnvironment()
-  }
 }
 
 watch(
@@ -647,13 +648,11 @@ watch(
     }
 
     if (gateState.value === 'NO_TARGET' || gateState.value === 'NEED_INSTALL') {
-      quickSetupDebugOpen.value = false
       activeNav.value = 'overview'
       return
     }
 
     if (gateState.value === 'NEED_CONFIG') {
-      quickSetupDebugOpen.value = false
       activeNav.value = 'overview'
       return
     }
@@ -695,6 +694,46 @@ const loadSshProfiles = async () => {
   }
 }
 
+const autoConnectSsh = async (profile: SshProfile): Promise<boolean> => {
+  sshAutoConnecting.value = true
+  try {
+    const fingerprint = await invoke<FingerprintInfo>('ssh_connect', {
+      host: profile.host,
+      port: profile.port,
+      username: profile.username,
+    })
+
+    if (!fingerprint.isKnown) {
+      // 指纹未知，等待用户确认后再认证
+      const confirmed = await new Promise<boolean>((resolve) => {
+        sshFingerprint.value = fingerprint
+        sshFingerprintCallback.value = () => resolve(true)
+        sshAutoConnectReject.value = () => resolve(false)
+        showFingerprintDialog.value = true
+      })
+      sshAutoConnectReject.value = null
+      if (!confirmed) return false
+    }
+
+    // 执行认证
+    if (profile.authMode === 'password' && profile.password) {
+      await invoke('ssh_auth_password', { password: profile.password })
+    } else if (profile.authMode === 'privateKey' && profile.keyPath) {
+      await invoke('ssh_auth_key', { keyPath: profile.keyPath, passphrase: null })
+    } else {
+      return false
+    }
+
+    sshConnected.value = true
+    showToast('success', 'SSH 自动连接成功')
+    return true
+  } catch {
+    return false
+  } finally {
+    sshAutoConnecting.value = false
+  }
+}
+
 const selectEnvironment = async (index: number) => {
   showEnvDropdown.value = false
   currentEnvIndex.value = index
@@ -717,6 +756,14 @@ const selectEnvironment = async (index: number) => {
   }
 
   if (!sshConnected.value) {
+    const profile = selected.sshProfile
+    if (profile && (profile.password || profile.keyPath)) {
+      const ok = await autoConnectSsh(profile)
+      if (ok) {
+        await checkEnvironment()
+        return
+      }
+    }
     showSshModal.value = true
     return
   }
@@ -843,12 +890,14 @@ const loadBrowserToolSetting = async () => {
 
   if (!openclawInstalled.value) {
     browserDefaultProfileEnabled.value = false
+    toolsFullProfileEnabled.value = false
     browserSettingError.value = '当前环境未安装 OpenClaw，无法读取配置'
     return
   }
 
   if (currentEnv.value.mode === 'ssh' && !sshConnected.value) {
     browserDefaultProfileEnabled.value = false
+    toolsFullProfileEnabled.value = false
     browserSettingError.value = 'SSH 未连接，无法读取远程配置'
     return
   }
@@ -858,9 +907,17 @@ const loadBrowserToolSetting = async () => {
     const source = await resolveCurrentConfigSource()
     browserSettingPath.value = source.path
     browserDefaultProfileEnabled.value = readBrowserDefaultProfileEnabled(source.config)
+
+    const toolsRaw = source.config.tools
+    toolsFullProfileEnabled.value =
+      toolsRaw && typeof toolsRaw === 'object' && !Array.isArray(toolsRaw)
+        ? (toolsRaw as Record<string, unknown>).profile === 'full'
+        : false
+
     browserSettingReady.value = true
   } catch (error) {
     browserDefaultProfileEnabled.value = false
+    toolsFullProfileEnabled.value = false
     browserSettingError.value = String(error)
   } finally {
     browserSettingLoading.value = false
@@ -903,6 +960,47 @@ const toggleBrowserDefaultProfile = async () => {
   }
 }
 
+const toggleToolsFullProfile = async () => {
+  if (toolsProfileSwitchDisabled.value) return
+
+  const next = !toolsFullProfileEnabled.value
+  const previous = toolsFullProfileEnabled.value
+  toolsProfileSaving.value = true
+  browserSettingError.value = ''
+  toolsFullProfileEnabled.value = next
+
+  try {
+    const source = await resolveCurrentConfigSource()
+    const toolsRaw = source.config.tools
+    const toolsConfig: Record<string, unknown> =
+      toolsRaw && typeof toolsRaw === 'object' && !Array.isArray(toolsRaw)
+        ? { ...(toolsRaw as Record<string, unknown>) }
+        : {}
+
+    if (next) {
+      toolsConfig.profile = 'full'
+    } else {
+      delete toolsConfig.profile
+    }
+
+    if (Object.keys(toolsConfig).length > 0) {
+      source.config.tools = toolsConfig
+    } else {
+      delete source.config.tools
+    }
+
+    await persistCurrentConfigSource(source)
+    browserSettingPath.value = source.path
+    showToast('success', next ? '已开启完整工具能力（tools.profile = full）' : '已关闭完整工具能力')
+  } catch (error) {
+    toolsFullProfileEnabled.value = previous
+    browserSettingError.value = String(error)
+    showToast('error', `保存工具配置失败: ${error}`)
+  } finally {
+    toolsProfileSaving.value = false
+  }
+}
+
 const handleFingerprint = (info: FingerprintInfo, onConfirm: () => void) => {
   if (info.isKnown) {
     onConfirm()
@@ -929,15 +1027,21 @@ const confirmFingerprint = async () => {
 
 const rejectFingerprint = async () => {
   showFingerprintDialog.value = false
+  const autoReject = sshAutoConnectReject.value
   sshFingerprint.value = null
   sshFingerprintCallback.value = null
+  sshAutoConnectReject.value = null
   try {
     await invoke('ssh_disconnect')
   } catch {
     // ignored
   }
   sshConnected.value = false
-  showToast('error', '已拒绝 SSH 指纹，连接已取消')
+  if (autoReject) {
+    autoReject()
+  } else {
+    showToast('error', '已拒绝 SSH 指纹，连接已取消')
+  }
 }
 
 const handleSshConnected = async () => {
@@ -1080,7 +1184,6 @@ const handleInstallComplete = async () => {
   if (shouldClearQuickSetupSessionAfterInstall('local')) {
     clearQuickSetupSession()
     quickSetupResumePending.value = false
-    quickSetupDebugOpen.value = false
   }
   activeNav.value = 'overview'
   await checkEnvironment()
@@ -1089,14 +1192,12 @@ const handleInstallComplete = async () => {
 const handleQuickSetupComplete = async () => {
   targetMode.value = 'local'
   lastActionFailed.value = false
-  quickSetupDebugOpen.value = false
   quickSetupResumePending.value = false
   activeNav.value = 'overview'
   await checkEnvironment()
 }
 
 const handleQuickSetupClose = () => {
-  quickSetupDebugOpen.value = false
   quickSetupResumePending.value = false
 }
 
@@ -1196,12 +1297,18 @@ onUnmounted(() => {
             </button>
             <div class="relative env-dropdown-container">
               <button class="oc-toolbar-btn h-8 min-w-[180px] justify-start" type="button" aria-label="environment-switcher" @click="showEnvDropdown = !showEnvDropdown">
+                <Loader2
+                  v-if="sshAutoConnecting"
+                  class="h-4 w-4 animate-spin"
+                  style="color: var(--oc-accent);"
+                />
                 <component
+                  v-else
                   :is="currentEnv.mode === 'local' ? Monitor : Wifi"
                   class="h-4 w-4"
                   :style="{ color: currentEnv.mode === 'local' ? 'var(--oc-accent)' : sshConnected ? 'var(--oc-success)' : 'var(--oc-text-muted)' }"
                 />
-                <span class="truncate text-sm">{{ currentEnv.label }}</span>
+                <span class="truncate text-sm">{{ sshAutoConnecting ? '连接中...' : currentEnv.label }}</span>
                 <ChevronDown class="ml-auto h-4 w-4" :class="{ 'rotate-180': showEnvDropdown }" />
               </button>
 
@@ -1366,7 +1473,7 @@ onUnmounted(() => {
                   v-else-if="shouldShowQuickSetupGuide && envStatus"
                   class="h-full"
                   :show-toast="showToast"
-                  :show-close-action="shouldShowQuickSetupCloseAction"
+                  :show-close-action="false"
                   :system-os="envStatus.system.os"
                   @close="handleQuickSetupClose"
                   @complete="handleQuickSetupComplete"
@@ -1478,47 +1585,50 @@ onUnmounted(() => {
                     </div>
                   </div>
 
+                  <div class="mt-3 rounded-[12px] border p-4" style="border-color: var(--oc-card-border); background: var(--oc-card-elevated);">
+                    <div class="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p class="text-sm font-medium" style="color: var(--oc-text-primary);">完整工具能力</p>
+                        <p class="mt-1 text-xs" style="color: var(--oc-text-muted);">
+                          开启时写入 <code>tools.profile</code> = <code>"full"</code>，启用浏览器、自动化与调试能力；关闭时删除该字段。
+                        </p>
+                      </div>
+                      <div class="inline-flex items-center gap-3">
+                        <button
+                          type="button"
+                          aria-label="toggle-tools-full-profile"
+                          class="relative inline-flex h-6 w-11 items-center rounded-full border transition-colors"
+                          :style="{
+                            borderColor: toolsFullProfileEnabled ? 'color-mix(in srgb, var(--oc-success) 55%, transparent)' : 'var(--oc-card-border)',
+                            background: toolsFullProfileEnabled
+                              ? 'color-mix(in srgb, var(--oc-success) 28%, transparent)'
+                              : 'color-mix(in srgb, var(--oc-card-elevated) 92%, transparent)'
+                          }"
+                          :disabled="toolsProfileSwitchDisabled"
+                          @click="toggleToolsFullProfile"
+                        >
+                          <span
+                            class="h-4 w-4 rounded-full border transition-transform"
+                            :style="{
+                              borderColor: 'var(--oc-card-border)',
+                              background: 'var(--oc-card)',
+                              transform: toolsFullProfileEnabled ? 'translateX(22px)' : 'translateX(2px)'
+                            }"
+                          />
+                        </button>
+                        <span class="text-xs" :style="{ color: toolsFullProfileEnabled ? 'var(--oc-success)' : 'var(--oc-text-muted)' }">
+                          {{ toolsProfileStatusText }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
                   <p v-if="browserSettingPath" class="mt-3 text-xs" style="color: var(--oc-text-muted);">
                     配置文件：{{ browserSettingPath }}
                   </p>
                   <p v-if="browserSettingError" class="mt-2 text-xs" style="color: var(--oc-danger);">
                     {{ browserSettingError }}
                   </p>
-                </section>
-
-                <section class="oc-panel p-6">
-                  <div class="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <h4 class="text-lg font-semibold" style="color: var(--oc-text-primary);">页面调试</h4>
-                      <p class="mt-1 text-sm" style="color: var(--oc-text-muted);">
-                        从设置页直接打开快速引导，便于调试布局、主题色和页面内容。
-                      </p>
-                    </div>
-                    <span
-                      class="rounded-[10px] border px-2.5 py-1 text-xs"
-                      style="border-color: color-mix(in srgb, var(--oc-accent) 12%, var(--oc-card-border)); color: var(--oc-accent);"
-                    >
-                      调试入口
-                    </span>
-                  </div>
-
-                  <div
-                    class="mt-4 rounded-[12px] border p-4"
-                    style="border-color: color-mix(in srgb, var(--oc-accent) 10%, var(--oc-card-border)); background: color-mix(in srgb, var(--oc-accent-soft) 18%, var(--oc-card) 82%);"
-                  >
-                    <div class="flex flex-wrap items-center justify-between gap-4">
-                      <div>
-                        <p class="text-sm font-medium" style="color: var(--oc-text-primary);">打开快速引导页面</p>
-                        <p class="mt-1 text-xs leading-6" style="color: var(--oc-text-secondary);">
-                          使用当前本地环境数据渲染快速引导，用于检查满高布局与细节视觉效果。
-                        </p>
-                      </div>
-
-                      <Button variant="default" @click="openQuickSetupDebug">
-                        打开快速引导
-                      </Button>
-                    </div>
-                  </div>
                 </section>
 
                 <section v-if="showOpenClawUninstallAction" class="oc-panel p-6">

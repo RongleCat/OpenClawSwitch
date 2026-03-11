@@ -17,26 +17,23 @@ export const shouldUseFixedMainContentLayout = (
   gateState: GateState,
   targetMode: EnvMode | null,
   activeNav: GateNavPage,
-  quickSetupDebugOpen: boolean
+  quickSetupForcedOpen: boolean
 ) =>
   shouldUseFixedGateInstallLayout(gateState, targetMode)
-  || quickSetupDebugOpen
+  || quickSetupForcedOpen
   || (!isGateActive && (activeNav === 'channels' || activeNav === 'overview' || activeNav === 'diagnostics' || activeNav === 'ai-config'))
 
-export const shouldRenderSidebar = (isGateActive: boolean, quickSetupDebugOpen: boolean) =>
-  !isGateActive && !quickSetupDebugOpen
-
-export const shouldRenderQuickSetupCloseAction = (isGateActive: boolean, quickSetupDebugOpen: boolean) =>
-  !isGateActive && quickSetupDebugOpen
+export const shouldRenderSidebar = (isGateActive: boolean, quickSetupForcedOpen: boolean) =>
+  !isGateActive && !quickSetupForcedOpen
 
 export const shouldRenderQuickSetupGuide = (
   isGateActive: boolean,
   gateState: GateState,
   targetMode: EnvMode | null,
-  quickSetupDebugOpen: boolean,
+  quickSetupForcedOpen: boolean,
   envReady: boolean
 ) =>
   envReady && (
     (isGateActive && gateState === 'NEED_CONFIG' && targetMode === 'local')
-    || quickSetupDebugOpen
+    || quickSetupForcedOpen
   )
