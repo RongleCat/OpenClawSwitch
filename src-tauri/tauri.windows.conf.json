@@ -1,0 +1,12 @@
+{
+  "build": {
+    "beforeBuildCommand": "node ./scripts/prepare-windows-tools-vendor.mjs && node ./node_modules/vite/bin/vite.js build"
+  },
+  "tauri": {
+    "bundle": {
+      "resources": [
+        "resources/windows/**"
+      ]
+    }
+  }
+}

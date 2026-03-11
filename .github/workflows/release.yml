@@ -55,7 +55,7 @@ jobs:
 
       - name: Build Tauri App (Windows)
         if: matrix.platform == 'windows-latest'
-        run: npm run tauri build
+        run: npm run tauri:build:windows
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
