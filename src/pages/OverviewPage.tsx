@@ -1,13 +1,15 @@
-import { useEffect, useState } from "react";
-import { Activity, Box, FolderTree, Globe } from "lucide-react";
+import { startTransition, useEffect, useState } from "react";
+import { Activity, Box, FolderTree, Globe, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { scheduleDeferredTask } from "@/domain/deferredTask";
+import { resolveGatewayQuickActionLabel, resolveGatewayQuickActionState } from "@/domain/gatewayServiceAction";
 import { getRuntimeHealth } from "@/lib/runtime";
 import { useGatewayStore } from "@/stores/gatewayStore";
 
 export function OverviewPage() {
-  const { status, refresh, start, stop, restart } = useGatewayStore();
+  const { status, refresh, start, stop, restart, pendingAction } = useGatewayStore();
   const [runtime, setRuntime] = useState({
     nodeReady: true,
     openclawReady: true,
@@ -16,17 +18,42 @@ export function OverviewPage() {
   });
 
   useEffect(() => {
-    void refresh();
-    void getRuntimeHealth().then(setRuntime);
+    let systemRefreshTimeoutId: number | null = null;
+
+    const dispose = scheduleDeferredTask(() => {
+      void refresh({ includeSystemStatus: false, silent: true });
+      void getRuntimeHealth().then((nextRuntime) => {
+        startTransition(() => {
+          setRuntime(nextRuntime);
+        });
+      });
+
+      systemRefreshTimeoutId = window.setTimeout(() => {
+        void refresh({ silent: true });
+      }, 400);
+    });
+
+    return () => {
+      dispose();
+      if (systemRefreshTimeoutId !== null) {
+        window.clearTimeout(systemRefreshTimeoutId);
+      }
+    };
   }, [refresh]);
 
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-2 gap-3">
         <StatusCard status={status.state} nodeReady={runtime.nodeReady} />
-        <QuickActions onStart={() => void start()} onStop={() => void stop()} onRestart={() => void restart()} running={status.state === "running"} />
+        <QuickActions
+          onStart={() => void start()}
+          onStop={() => void stop()}
+          onRestart={() => void restart()}
+          running={status.state === "running"}
+          pendingAction={pendingAction}
+        />
       </div>
-      <RuntimeHealth nodeReady={runtime.nodeReady} openclawReady={runtime.openclawReady} configReady={runtime.configReady} />
+      <RuntimeHealth openclawReady={runtime.openclawReady} configReady={runtime.configReady} />
     </div>
   );
 }
@@ -58,19 +85,50 @@ function StatusCard({ status, nodeReady }: { status: string; nodeReady: boolean 
   );
 }
 
-function QuickActions({ onStart, onStop, onRestart, running }: { onStart: () => void; onStop: () => void; onRestart: () => void; running: boolean }) {
+function QuickActions({
+  onStart,
+  onStop,
+  onRestart,
+  running,
+  pendingAction,
+}: {
+  onStart: () => void;
+  onStop: () => void;
+  onRestart: () => void;
+  running: boolean;
+  pendingAction: "start" | "restart" | "stop" | null;
+}) {
+  const startState = resolveGatewayQuickActionState({
+    actionId: "start",
+    baseDisabled: running,
+    pendingActionId: pendingAction,
+  });
+  const restartState = resolveGatewayQuickActionState({
+    actionId: "restart",
+    baseDisabled: !running,
+    pendingActionId: pendingAction,
+  });
+  const stopState = resolveGatewayQuickActionState({
+    actionId: "stop",
+    baseDisabled: !running,
+    pendingActionId: pendingAction,
+  });
+
   return (
     <Card className="bg-card/60 backdrop-blur-md">
       <CardContent className="pt-4">
         <div className="flex gap-2">
-          <Button size="sm" className="flex-1" onClick={onStart} disabled={running}>
-            启动
+          <Button size="sm" className="flex-1 gap-2" onClick={onStart} disabled={startState.disabled} aria-busy={startState.loading}>
+            {startState.loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            {resolveGatewayQuickActionLabel("start", "启动", startState.loading)}
           </Button>
-          <Button size="sm" variant="outline" className="flex-1" onClick={onRestart} disabled={!running}>
-            重启
+          <Button size="sm" variant="outline" className="flex-1 gap-2" onClick={onRestart} disabled={restartState.disabled} aria-busy={restartState.loading}>
+            {restartState.loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            {resolveGatewayQuickActionLabel("restart", "重启", restartState.loading)}
           </Button>
-          <Button size="sm" variant="outline" className="flex-1" onClick={onStop} disabled={!running}>
-            停止
+          <Button size="sm" variant="outline" className="flex-1 gap-2" onClick={onStop} disabled={stopState.disabled} aria-busy={stopState.loading}>
+            {stopState.loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            {resolveGatewayQuickActionLabel("stop", "停止", stopState.loading)}
           </Button>
         </div>
       </CardContent>
@@ -78,7 +136,7 @@ function QuickActions({ onStart, onStop, onRestart, running }: { onStart: () => 
   );
 }
 
-function RuntimeHealth({ nodeReady, openclawReady, configReady }: { nodeReady: boolean; openclawReady: boolean; configReady: boolean }) {
+function RuntimeHealth({ openclawReady, configReady }: { openclawReady: boolean; configReady: boolean }) {
   return (
     <Card className="bg-card/60 backdrop-blur-md">
       <CardContent className="pt-4">

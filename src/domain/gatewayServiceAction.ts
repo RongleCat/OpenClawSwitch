@@ -30,3 +30,21 @@ export const resolveGatewayQuickActionState = ({
   loading: pendingActionId === actionId,
   disabled: baseDisabled || pendingActionId !== null,
 })
+
+export const resolveGatewayQuickActionLabel = (
+  actionId: string,
+  label: string,
+  loading: boolean
+) => {
+  if (!loading) {
+    return label
+  }
+
+  const loadingLabels: Record<string, string> = {
+    start: '启动中...',
+    restart: '重启中...',
+    stop: '停止中...',
+  }
+
+  return loadingLabels[actionId] || `${label}中...`
+}

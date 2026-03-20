@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   resolveGatewayQuickActionGridColumns,
+  resolveGatewayQuickActionLabel,
   resolveGatewayQuickActionState,
   shouldShowInstallGatewayServiceAction,
 } from './gatewayServiceAction'
@@ -100,5 +101,17 @@ describe('shouldShowInstallGatewayServiceAction', () => {
       loading: false,
       disabled: true,
     })
+  })
+})
+
+describe('resolveGatewayQuickActionLabel', () => {
+  it('returns loading labels for the pending gateway action', () => {
+    expect(resolveGatewayQuickActionLabel('start', '启动', true)).toBe('启动中...')
+    expect(resolveGatewayQuickActionLabel('restart', '重启', true)).toBe('重启中...')
+    expect(resolveGatewayQuickActionLabel('stop', '停止', true)).toBe('停止中...')
+  })
+
+  it('keeps the base label when the action is idle', () => {
+    expect(resolveGatewayQuickActionLabel('start', '启动', false)).toBe('启动')
   })
 })

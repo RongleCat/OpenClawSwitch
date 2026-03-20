@@ -805,7 +805,7 @@ fn build_bundled_tui_command(app: &tauri::AppHandle) -> Result<String, String> {
     let node_bin = bundled_runtime::resolve_bundled_node_bin(app)?;
     let openclaw_entry = bundled_runtime::resolve_bundled_openclaw_entry(app)?;
     let data_dir = bundled_runtime::ensure_openclaw_data_dir()?;
-    let config_path = bundled_runtime::ensure_default_config_file()?;
+    let config_path = bundled_runtime::resolve_runtime_config_path_for_launch()?;
     let home_dir = dirs::home_dir().ok_or("无法获取用户主目录".to_string())?;
 
     Ok(format!(
@@ -857,8 +857,7 @@ fn open_tui(app: tauri::AppHandle) -> Result<(), String> {
                 "-e",
                 &format!(
                     "tell application \"Terminal\" to do script \"source {} && {}\"",
-                    config_file
-                    ,
+                    config_file,
                     bundled_tui_command.replace('"', "\\\"")
                 ),
                 "-e",
@@ -872,10 +871,19 @@ fn open_tui(app: tauri::AppHandle) -> Result<(), String> {
     {
         // 尝试多种终端模拟器
         let terminals = [
-            ("gnome-terminal", vec!["--", "sh", "-lc", bundled_tui_command.as_str()]),
-            ("konsole", vec!["-e", "sh", "-lc", bundled_tui_command.as_str()]),
+            (
+                "gnome-terminal",
+                vec!["--", "sh", "-lc", bundled_tui_command.as_str()],
+            ),
+            (
+                "konsole",
+                vec!["-e", "sh", "-lc", bundled_tui_command.as_str()],
+            ),
             ("xfce4-terminal", vec!["-e", bundled_tui_command.as_str()]),
-            ("xterm", vec!["-e", "sh", "-lc", bundled_tui_command.as_str()]),
+            (
+                "xterm",
+                vec!["-e", "sh", "-lc", bundled_tui_command.as_str()],
+            ),
         ];
 
         let mut success = false;
@@ -955,6 +963,7 @@ fn main() {
             health_check_gateway,
             get_runtime_health,
             get_gateway_status,
+            installer::get_system_gateway_status,
             open_tui,
             // SSH 连接
             ssh::ssh_connect,
@@ -995,6 +1004,9 @@ fn main() {
             installer::generate_default_config,
             installer::relaunch_as_admin,
             installer::install_gateway_service,
+            installer::start_external_gateway,
+            installer::stop_external_gateway,
+            installer::restart_external_gateway,
             installer::start_gateway,
             installer::stop_gateway,
             installer::get_channel_extension_status,

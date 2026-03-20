@@ -85,6 +85,16 @@ pub struct EnvironmentStatus {
     pub network_region: String,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemGatewayStatus {
+    pub available: bool,
+    pub state: Option<String>,
+    pub pid: Option<u32>,
+    pub url: Option<String>,
+    pub message: Option<String>,
+}
+
 /// 下载进度事件
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -161,7 +171,6 @@ const NODE_MIRRORS: &[&str] = &[
     "https://mirrors.cloud.tencent.com/nodejs-release/",
     "https://repo.huaweicloud.com/nodejs/",
 ];
-
 
 // GitHub 镜像源（多源容错）
 const FNM_MIRRORS: &[&str] = &[
@@ -504,6 +513,136 @@ fn detect_openclaw_bin_path() -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn extract_last_json_object(raw: &str) -> Option<&str> {
+    let mut depth = 0usize;
+    let mut current_start = None;
+    let mut last_complete = None;
+
+    for (index, ch) in raw.char_indices() {
+        match ch {
+            '{' => {
+                if depth == 0 {
+                    current_start = Some(index);
+                }
+                depth += 1;
+            }
+            '}' => {
+                if depth == 0 {
+                    continue;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(start) = current_start {
+                        last_complete = Some((start, index + ch.len_utf8()));
+                    }
+                    current_start = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    last_complete.map(|(start, end)| &raw[start..end])
+}
+
+fn read_system_gateway_status() -> SystemGatewayStatus {
+    let output = if let Some(bin_path) = detect_openclaw_bin_path() {
+        let program = bin_path.to_string_lossy().to_string();
+        run_cmd(&program, &["gateway", "status", "--json"])
+    } else {
+        run_shell(&with_fnm_env("openclaw gateway status --json"))
+    };
+
+    let raw_output = match output {
+        Ok(value) => value,
+        Err(error) => {
+            return SystemGatewayStatus {
+                available: detect_openclaw_bin_path().is_some(),
+                state: None,
+                pid: None,
+                url: None,
+                message: Some(error),
+            };
+        }
+    };
+
+    let json_payload = match extract_last_json_object(&raw_output) {
+        Some(payload) => payload,
+        None => {
+            return SystemGatewayStatus {
+                available: true,
+                state: None,
+                pid: None,
+                url: None,
+                message: Some("无法解析 openclaw gateway status --json 输出".to_string()),
+            };
+        }
+    };
+
+    let parsed: serde_json::Value = match serde_json::from_str(json_payload) {
+        Ok(value) => value,
+        Err(error) => {
+            return SystemGatewayStatus {
+                available: true,
+                state: None,
+                pid: None,
+                url: None,
+                message: Some(format!("解析系统 OpenClaw 网关状态失败: {}", error)),
+            };
+        }
+    };
+
+    let service_state = parsed
+        .pointer("/service/runtime/state")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            parsed
+                .pointer("/service/runtime/status")
+                .and_then(serde_json::Value::as_str)
+        });
+    let rpc_ok = parsed
+        .pointer("/rpc/ok")
+        .and_then(serde_json::Value::as_bool);
+    let pid = parsed
+        .pointer("/service/runtime/pid")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok());
+    let url = parsed
+        .pointer("/gateway/probeUrl")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            parsed
+                .pointer("/rpc/url")
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(|value| value.to_string());
+    let label = parsed
+        .pointer("/service/label")
+        .and_then(serde_json::Value::as_str);
+
+    let normalized_state = match (service_state, rpc_ok) {
+        (Some("running"), Some(true)) => Some("running".to_string()),
+        (Some("running"), Some(false)) => Some("starting".to_string()),
+        (Some(state), _) => Some(state.to_string()),
+        (None, Some(true)) => Some("running".to_string()),
+        _ => None,
+    };
+
+    let message = match (label, normalized_state.as_deref()) {
+        (Some(service_label), Some(state)) => Some(format!("{} is {}", service_label, state)),
+        (None, Some(state)) => Some(format!("System OpenClaw gateway is {}", state)),
+        _ => None,
+    };
+
+    SystemGatewayStatus {
+        available: true,
+        state: normalized_state,
+        pid,
+        url,
+        message,
+    }
 }
 
 #[cfg(test)]
@@ -2096,6 +2235,13 @@ pub async fn detect_network_region() -> String {
     }
 }
 
+#[tauri::command]
+pub async fn get_system_gateway_status() -> Result<SystemGatewayStatus, String> {
+    tauri::async_runtime::spawn_blocking(read_system_gateway_status)
+        .await
+        .map_err(|error| format!("系统 OpenClaw 网关状态检测任务失败: {}", error))
+}
+
 /// 综合环境检测
 #[tauri::command]
 pub async fn check_environment(app: AppHandle) -> EnvironmentStatus {
@@ -3069,7 +3215,12 @@ pub async fn run_full_install(app: AppHandle) -> Result<String, String> {
         emit_progress(&app, 5, total_steps, "验证安装", "success");
         Ok("安装完成".to_string())
     } else {
-        emit_log(&app, "verify", "验证失败: 内置 OpenClaw 运行时未就绪", "error");
+        emit_log(
+            &app,
+            "verify",
+            "验证失败: 内置 OpenClaw 运行时未就绪",
+            "error",
+        );
         emit_log(
             &app,
             "verify",
@@ -3295,6 +3446,123 @@ fn format_command_for_log(program: &Path, args: &[&str]) -> String {
         command.push_str(&shell_quote(arg));
     }
     command
+}
+
+#[cfg(target_os = "windows")]
+fn build_windows_shell_command(program: &Path, args: &[&str]) -> String {
+    let extension = program
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    let should_use_call = matches!(extension.as_str(), "cmd" | "bat");
+    let mut command = if should_use_call {
+        format!("call {}", shell_quote(&program.to_string_lossy()))
+    } else {
+        shell_quote(&program.to_string_lossy())
+    };
+
+    for arg in args {
+        command.push(' ');
+        command.push_str(&shell_quote(arg));
+    }
+
+    command
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_shell_command_capture(command_line: &str) -> Result<String, String> {
+    let mut command = Command::new("cmd");
+    apply_no_window(&mut command);
+    command
+        .args(["/c", command_line])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = command
+        .output()
+        .map_err(|error| format!("执行命令失败: {}", error))?;
+    let stdout = decode_command_output(&output.stdout);
+    let stderr = decode_command_output(&output.stderr);
+
+    if output.status.success() {
+        Ok(stdout)
+    } else {
+        Err(format_command_failure(
+            output.status.code(),
+            &stdout,
+            &stderr,
+        ))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_windows_shell_command_hidden(command_line: &str) -> Result<(), String> {
+    let mut command = Command::new("cmd");
+    apply_no_window(&mut command);
+    command
+        .args(["/c", command_line])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("启动命令失败: {}", error))
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_windows_external_openclaw_bin() -> Result<PathBuf, String> {
+    detect_openclaw_bin_path().ok_or_else(|| {
+        "未检测到外部 openclaw 可执行文件，无法使用 Windows 外部 CLI 控制".to_string()
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_external_openclaw_capture(args: &[&str]) -> Result<String, String> {
+    let openclaw_bin = resolve_windows_external_openclaw_bin()?;
+    let command_line = build_windows_shell_command(&openclaw_bin, args);
+    run_windows_shell_command_capture(&command_line)
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_windows_external_openclaw_hidden(args: &[&str]) -> Result<(), String> {
+    let openclaw_bin = resolve_windows_external_openclaw_bin()?;
+    let command_line = build_windows_shell_command(&openclaw_bin, args);
+    spawn_windows_shell_command_hidden(&command_line)
+}
+
+#[cfg(target_os = "windows")]
+fn start_windows_external_gateway(app: &AppHandle) -> Result<String, String> {
+    if crate::bundled_runtime::is_default_web_ui_reachable(Duration::from_secs(1)) {
+        return Ok("检测到本地网关已在运行".to_string());
+    }
+
+    spawn_windows_external_openclaw_hidden(&["gateway", "run"])?;
+    let ready = crate::gateway_supervisor::wait_for_gateway_ready();
+    let _ = crate::desktop_shell::refresh_tray_menu(app);
+
+    if ready {
+        Ok("已通过外部 OpenClaw CLI 启动 Windows 网关".to_string())
+    } else {
+        Ok("已发送外部 OpenClaw 网关启动命令".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn stop_windows_external_gateway(app: &AppHandle) -> Result<String, String> {
+    let _ = crate::gateway_supervisor::stop_gateway_process(app);
+    run_windows_external_openclaw_capture(&["gateway", "stop"])?;
+    let _ = crate::desktop_shell::refresh_tray_menu(app);
+    Ok("已通过外部 OpenClaw CLI 停止 Windows 网关".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn restart_windows_external_gateway(app: &AppHandle) -> Result<String, String> {
+    let _ = crate::gateway_supervisor::stop_gateway_process(app);
+    run_windows_external_openclaw_capture(&["gateway", "restart"])?;
+    let _ = crate::gateway_supervisor::wait_for_gateway_ready();
+    let _ = crate::desktop_shell::refresh_tray_menu(app);
+    Ok("已通过外部 OpenClaw CLI 重启 Windows 网关".to_string())
 }
 
 #[cfg(target_os = "windows")]
@@ -3663,6 +3931,48 @@ pub async fn install_gateway_service(app: AppHandle) -> Result<String, String> {
             emit_log(&app, step, &message, "error");
             Err(message)
         }
+    }
+}
+
+#[tauri::command]
+pub async fn start_external_gateway(app: AppHandle) -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        return start_windows_external_gateway(&app);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        Err("当前平台暂不支持外部 Windows OpenClaw CLI 控制".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn stop_external_gateway(app: AppHandle) -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        return stop_windows_external_gateway(&app);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        Err("当前平台暂不支持外部 Windows OpenClaw CLI 控制".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn restart_external_gateway(app: AppHandle) -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        return restart_windows_external_gateway(&app);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        Err("当前平台暂不支持外部 Windows OpenClaw CLI 控制".to_string())
     }
 }
 /// 启动本地网关服务
