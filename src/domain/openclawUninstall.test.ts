@@ -81,7 +81,7 @@ describe('resolveOpenClawUninstallCleanupItems', () => {
   it('describes reverse cleanup for windows without deleting config', () => {
     expect(resolveOpenClawUninstallCleanupItems({ os: 'windows', removeConfigDir: false })).toEqual([
       '停止并删除 openclaw-gateway Windows 服务（NSSM）',
-      '卸载当前用户下的全局 openclaw npm 包',
+      '清理当前应用托管的 OpenClaw 运行入口',
       '保留 ~/.openclaw 中的配置、工作区和运行时，方便后续重新安装',
     ])
   })
@@ -89,9 +89,9 @@ describe('resolveOpenClawUninstallCleanupItems', () => {
   it('adds config and environment cleanup when removing managed directory', () => {
     expect(resolveOpenClawUninstallCleanupItems({ os: 'linux', removeConfigDir: true })).toEqual([
       '停止并卸载 OpenClaw Gateway 服务',
-      '卸载当前用户下的全局 openclaw npm 包',
+      '清理当前应用托管的 OpenClaw 运行入口',
       '删除 ~/.openclaw 目录中的配置、工作区、缓存与日志',
-      '清理用户 PATH 与 .npmrc 中的托管运行时配置',
+      '清理用户 PATH 中的托管运行时配置',
     ])
   })
 })

@@ -5,7 +5,7 @@ const labels = {
   check: '环境检测',
   git: '安装 Git',
   node: '安装 Node.js',
-  openclaw: '安装 OpenClaw',
+  openclaw: '准备 OpenClaw 运行环境',
   verify: '验证安装',
 }
 

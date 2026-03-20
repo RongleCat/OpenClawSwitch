@@ -1,39 +1,64 @@
 {
   "name": "openclawswitch",
   "version": "2.0.0",
-  "description": "OpenClawSwitch - OpenClaw configuration manager built with Tauri + Vue 3",
+  "description": "OpenClawSwitch - OpenClaw desktop manager built with Tauri + React",
+  "openclawBundle": {
+    "packageName": "openclaw",
+    "version": "2026.3.7",
+    "registry": "https://registry.npmmirror.com"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "build:check": "vue-tsc --noEmit && vite build",
+    "build:check": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "test": "vitest run",
+    "bundle:openclaw": "node ./scripts/bundle-openclaw.mjs",
+    "bundle:node": "node ./scripts/bundle-node-runtime.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "tauri:build:mac": "./scripts/build-mac-universal.sh",
-    "tauri:build:windows": "tauri build --config src-tauri/tauri.windows.conf.json",
-    "vendor:windows-tools": "node ./scripts/prepare-windows-tools-vendor.mjs"
+    "tauri:build:mac": "tauri build",
+    "tauri:build:windows": "tauri build --config src-tauri/tauri.windows.conf.json"
   },
   "dependencies": {
-    "@tauri-apps/api": "^1.5.3",
+    "@radix-ui/react-dialog": "^1.1.15",
+    "@radix-ui/react-dropdown-menu": "^2.1.16",
+    "@radix-ui/react-scroll-area": "^1.2.10",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@radix-ui/react-switch": "^1.2.6",
+    "@radix-ui/react-tabs": "^1.1.13",
+    "@radix-ui/react-tooltip": "^1.2.8",
+    "@tauri-apps/api": "^2.2.0",
+    "@tauri-apps/plugin-autostart": "^2.2.0",
+    "@tauri-apps/plugin-opener": "^2.2.0",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.0",
-    "lucide-vue-next": "^0.309.0",
-    "tailwind-merge": "^2.2.1",
-    "vue": "^3.4.15"
+    "i18next": "^25.0.0",
+    "lucide-react": "^0.469.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-i18next": "^16.0.0",
+    "react-router-dom": "^7.2.0",
+    "sonner": "^1.7.1",
+    "tailwind-merge": "^2.6.0",
+    "tar": "^7.4.3",
+    "zustand": "^5.0.2"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^1.5.9",
-    "@vitejs/plugin-vue": "^5.0.3",
+    "@tauri-apps/cli": "^2.2.5",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.17",
+    "jsdom": "^25.0.1",
     "postcss": "^8.4.33",
     "tailwindcss": "^3.4.1",
     "tailwindcss-animate": "^1.0.7",
-    "to-ico": "^1.1.5",
     "typescript": "^5.3.3",
     "vite": "^5.0.11",
-    "vitest": "^4.0.18",
-    "vue-tsc": "^3.2.5"
+    "vitest": "^4.0.18"
   }
 }

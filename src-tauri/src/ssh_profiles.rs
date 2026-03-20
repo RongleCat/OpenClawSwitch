@@ -17,8 +17,7 @@ fn get_profiles_path() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or("无法获取用户主目录")?;
     let dir = home.join(".openclaw");
     if !dir.exists() {
-        fs::create_dir_all(&dir)
-            .map_err(|e| format!("创建目录失败: {}", e))?;
+        fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {}", e))?;
     }
     Ok(dir.join("ssh_profiles.json"))
 }
@@ -31,19 +30,15 @@ fn load_store() -> Result<ProfileStore, String> {
             profiles: Vec::new(),
         });
     }
-    let content = fs::read_to_string(&path)
-        .map_err(|e| format!("读取配置失败: {}", e))?;
-    serde_json::from_str(&content)
-        .map_err(|e| format!("解析配置失败: {}", e))
+    let content = fs::read_to_string(&path).map_err(|e| format!("读取配置失败: {}", e))?;
+    serde_json::from_str(&content).map_err(|e| format!("解析配置失败: {}", e))
 }
 
 /// 保存配置列表到文件
 fn save_store(store: &ProfileStore) -> Result<(), String> {
     let path = get_profiles_path()?;
-    let json = serde_json::to_string_pretty(store)
-        .map_err(|e| format!("序列化失败: {}", e))?;
-    fs::write(&path, json)
-        .map_err(|e| format!("写入失败: {}", e))?;
+    let json = serde_json::to_string_pretty(store).map_err(|e| format!("序列化失败: {}", e))?;
+    fs::write(&path, json).map_err(|e| format!("写入失败: {}", e))?;
     Ok(())
 }
 

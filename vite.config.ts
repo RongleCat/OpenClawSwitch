@@ -1,10 +1,10 @@
+import path from "node:path";
 import { defineConfig } from "vite";
-import vue from "@vitejs/plugin-vue";
-import path from "path";
+import react from "@vitejs/plugin-react";
 
 // https://vitejs.dev/config/
 export default defineConfig(async () => ({
-  plugins: [vue()],
+  plugins: [react()],
 
   resolve: {
     alias: {
@@ -20,5 +20,14 @@ export default defineConfig(async () => ({
     watch: {
       ignored: ["**/src-tauri/**"],
     },
+  },
+  test: {
+    environment: "jsdom",
+    exclude: [
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/src-tauri/resources/vendor/**",
+      "**/src-tauri/target/**",
+    ],
   },
 }));

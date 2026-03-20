@@ -59,12 +59,12 @@ export const resolveOpenClawUninstallCleanupItems = ({
     os === 'windows'
       ? '停止并删除 openclaw-gateway Windows 服务（NSSM）'
       : '停止并卸载 OpenClaw Gateway 服务',
-    '卸载当前用户下的全局 openclaw npm 包',
+    '清理当前应用托管的 OpenClaw 运行入口',
   ]
 
   if (removeConfigDir) {
     items.push('删除 ~/.openclaw 目录中的配置、工作区、缓存与日志')
-    items.push('清理用户 PATH 与 .npmrc 中的托管运行时配置')
+    items.push('清理用户 PATH 中的托管运行时配置')
     return items
   }
 

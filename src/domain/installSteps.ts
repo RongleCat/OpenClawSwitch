@@ -16,7 +16,7 @@ export const buildInstallSteps = (_isWindows: boolean): InstallStepItem[] => [
   createStep('环境检测'),
   createStep('安装 Git'),
   createStep('安装 Node.js'),
-  createStep('安装 OpenClaw'),
+  createStep('准备 OpenClaw 运行环境'),
   createStep('验证安装'),
 ]
 

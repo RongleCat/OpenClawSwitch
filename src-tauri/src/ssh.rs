@@ -1,4 +1,4 @@
-﻿// SSH 閺夆晜绮庨埢鍏兼交閻愭潙澶嶉柡宥囶焾缁烘儳螣閳ヨ櫕鍋?
+// SSH 閺夆晜绮庨埢鍏兼交閻愭潙澶嶉柡宥囶焾缁烘儳螣閳ヨ櫕鍋?
 // 濞达綀娉曢弫?ssh2 crate 閻庡湱鍋熼獮?SSH 閺夆晝鍋炵敮鎾Υ娴ｇ瓔鍚囬悹鍥︾筏缁辨繈鏌呭宕囩畺 channel 闁告稒鍨濋幎銈夊箥瑜戦、鎴犫偓鍦仧楠炲洭寮崶锔筋偨闁瑰灝绉崇紞?
 
 use serde::{Deserialize, Serialize};
@@ -43,14 +43,16 @@ fn load_known_hosts() -> HashSet<String> {
 fn save_known_host(fingerprint: &str) -> Result<(), String> {
     let path = get_known_hosts_path();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("闁告帗绋戠紓鎾绘儎椤旇偐绉垮鎯扮簿鐟? {}", e))?;
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("闁告帗绋戠紓鎾绘儎椤旇偐绉垮鎯扮簿鐟? {}", e))?;
     }
 
     let mut hosts = load_known_hosts();
     hosts.insert(fingerprint.to_string());
 
     let content = hosts.into_iter().collect::<Vec<_>>().join("\n");
-    fs::write(&path, content).map_err(|e| format!("闁告劖鐟ラ崣鍡涘棘閸ワ附顐藉鎯扮簿鐟? {}", e))?;
+    fs::write(&path, content)
+        .map_err(|e| format!("闁告劖鐟ラ崣鍡涘棘閸ワ附顐藉鎯扮簿鐟? {}", e))?;
 
     Ok(())
 }
@@ -192,15 +194,20 @@ pub fn ssh_connect(
 ) -> Result<FingerprintInfo, String> {
     // 闁稿繐鐗婇弻鍥ь嚕閳ь剙顔忛崣澶嬬畳閺夆晝鍋炵敮?
     {
-        let mut conn = manager.connection.lock().map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
+        let mut conn = manager
+            .connection
+            .lock()
+            .map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
         *conn = None;
     }
 
     let addr = format!("{}:{}", host, port);
-    let tcp = TcpStream::connect(&addr).map_err(|e| format!("閺夆晝鍋炵敮瀛樺緞鏉堫偉袝: {}", e))?;
+    let tcp =
+        TcpStream::connect(&addr).map_err(|e| format!("閺夆晝鍋炵敮瀛樺緞鏉堫偉袝: {}", e))?;
     tcp.set_nodelay(true).ok();
 
-    let mut session = Session::new().map_err(|e| format!("闁告帗绋戠紓鎾村濮樺磭妯堝鎯扮簿鐟? {}", e))?;
+    let mut session =
+        Session::new().map_err(|e| format!("闁告帗绋戠紓鎾村濮樺磭妯堝鎯扮簿鐟? {}", e))?;
     session.set_tcp_stream(tcp);
     session
         .handshake()
@@ -233,7 +240,10 @@ pub fn ssh_connect(
     };
 
     // 濞ｅ洦绻傞悺銊﹀濮樺磭妯堥柨娑樼墕閻ㄥ寮甸鍥跺悋閻犲洣绶ょ槐?
-    let mut conn = manager.connection.lock().map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
+    let mut conn = manager
+        .connection
+        .lock()
+        .map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
     *conn = Some(SshConnection {
         session,
         host,
@@ -251,11 +261,11 @@ pub fn ssh_save_fingerprint(fingerprint: String) -> Result<(), String> {
 
 /// 濞达綀娉曢弫銈団偓闈涙閻栨粎鎷嬮妶鍫㈡
 #[tauri::command]
-pub fn ssh_auth_password(
-    manager: State<SshManager>,
-    password: String,
-) -> Result<(), String> {
-    let conn = manager.connection.lock().map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
+pub fn ssh_auth_password(manager: State<SshManager>, password: String) -> Result<(), String> {
+    let conn = manager
+        .connection
+        .lock()
+        .map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
     let conn = conn.as_ref().ok_or("SSH connection not found")?;
 
     conn.session
@@ -276,21 +286,22 @@ pub fn ssh_auth_key(
     key_path: String,
     passphrase: Option<String>,
 ) -> Result<(), String> {
-    let conn = manager.connection.lock().map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
+    let conn = manager
+        .connection
+        .lock()
+        .map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
     let conn = conn.as_ref().ok_or("SSH connection not found")?;
 
     let key = Path::new(&key_path);
     if !key.exists() {
-        return Err(format!("缂佸绶氶幐婊堝棘閸ワ附顐藉☉鎾崇Т閻°劑宕? {}", key_path));
+        return Err(format!(
+            "缂佸绶氶幐婊堝棘閸ワ附顐藉☉鎾崇Т閻°劑宕? {}",
+            key_path
+        ));
     }
 
     conn.session
-        .userauth_pubkey_file(
-            &conn.username,
-            None,
-            key,
-            passphrase.as_deref(),
-        )
+        .userauth_pubkey_file(&conn.username, None, key, passphrase.as_deref())
         .map_err(|e| format!("缂佸绶氶幐婊呮媼閵堝牏妲堝鎯扮簿鐟? {}", e))?;
 
     if !conn.session.authenticated() {
@@ -303,7 +314,10 @@ pub fn ssh_auth_key(
 /// 闁哄偆鍘肩槐?SSH 閺夆晝鍋炵敮?
 #[tauri::command]
 pub fn ssh_disconnect(manager: State<SshManager>) -> Result<(), String> {
-    let mut conn = manager.connection.lock().map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
+    let mut conn = manager
+        .connection
+        .lock()
+        .map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
     if let Some(c) = conn.as_ref() {
         let _ = c.session.disconnect(None, "client disconnect", None);
     }
@@ -314,7 +328,10 @@ pub fn ssh_disconnect(manager: State<SshManager>) -> Result<(), String> {
 /// 闁兼儳鍢茶ぐ鍥ㄦ交閻愭潙澶嶉柣妯垮煐閳?
 #[tauri::command]
 pub fn ssh_get_status(manager: State<SshManager>) -> Result<bool, String> {
-    let conn = manager.connection.lock().map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
+    let conn = manager
+        .connection
+        .lock()
+        .map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
     Ok(conn
         .as_ref()
         .map(|c| c.session.authenticated())
@@ -327,7 +344,10 @@ pub fn ssh_list_dir(
     manager: State<SshManager>,
     path: String,
 ) -> Result<Vec<RemoteFileEntry>, String> {
-    let conn = manager.connection.lock().map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
+    let conn = manager
+        .connection
+        .lock()
+        .map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
     let conn = conn.as_ref().ok_or("SSH connection not found")?;
 
     if !conn.session.authenticated() {
@@ -356,11 +376,7 @@ pub fn ssh_list_dir(
     }
 
     // 闁烩晩鍠栫紞宥夊捶閵娿儱顤呴柨娑樻湰閺嬪啯绂掔捄鐑樿含闁告艾鍑界槐婵嬪触閸曨喖娈伴柟绋款槸閹洜绮旈悧鍫濈瑩閹?
-    entries.sort_by(|a, b| {
-        b.is_dir
-            .cmp(&a.is_dir)
-            .then_with(|| a.name.cmp(&b.name))
-    });
+    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
 
     Ok(entries)
 }
@@ -369,7 +385,8 @@ pub fn ssh_list_dir(
 fn parse_ls_line(line: &str, parent_path: &str) -> Option<RemoteFileEntry> {
     // ls -la 闁哄秶鍘х槐? drwxr-xr-x 2 root root 4096 1234567890 dirname
     // 闁? -rw-r--r-- 1 root root 1234 Jan 01 12:00 filename
-    let parts: Vec<&str> = line.splitn(9, char::is_whitespace)
+    let parts: Vec<&str> = line
+        .splitn(9, char::is_whitespace)
         .filter(|s| !s.is_empty())
         .collect();
 
@@ -408,11 +425,11 @@ fn parse_ls_line(line: &str, parent_path: &str) -> Option<RemoteFileEntry> {
 
 /// 閻犲洩顕цぐ鍥ㄦ交濠婂應鏌ら柡鍌氭矗濞嗐垽宕橀崨顓у晣闁挎稑鐗撻埀顒佷亢缁?cat 闁告稒鍨濋幎銈夋晬?
 #[tauri::command]
-pub fn ssh_read_file(
-    manager: State<SshManager>,
-    path: String,
-) -> Result<String, String> {
-    let conn = manager.connection.lock().map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
+pub fn ssh_read_file(manager: State<SshManager>, path: String) -> Result<String, String> {
+    let conn = manager
+        .connection
+        .lock()
+        .map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
     let conn = conn.as_ref().ok_or("SSH connection not found")?;
 
     if !conn.session.authenticated() {
@@ -430,7 +447,10 @@ pub fn ssh_write_file(
     path: String,
     content: String,
 ) -> Result<(), String> {
-    let conn = manager.connection.lock().map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
+    let conn = manager
+        .connection
+        .lock()
+        .map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
     let conn = conn.as_ref().ok_or("SSH connection not found")?;
 
     if !conn.session.authenticated() {
@@ -440,7 +460,8 @@ pub fn ssh_write_file(
     let escaped_path = path.replace('\'', "'\\''");
     let cmd = format!("cat > '{}'", escaped_path);
 
-    let mut channel = conn.session
+    let mut channel = conn
+        .session
         .channel_session()
         .map_err(|e| format!("闁告帗绋戠紓鎾绘焻濮樻湹澹曞鎯扮簿鐟? {}", e))?;
     channel
@@ -453,13 +474,18 @@ pub fn ssh_write_file(
         .map_err(|e| format!("闁告劖鐟ラ崣鍡樺緞鏉堫偉袝: {}", e))?;
 
     // 闁稿繑濞婂Λ?stdin 闂侇偅姘ㄩ悡鈩冩交濠婂應鏌?cat 闁告稒鍨濋幎銈囩磼閹惧瓨灏?
-    channel.send_eof().map_err(|e| format!("闁告瑦鍨块埀?EOF 濠㈡儼绮剧憴? {}", e))?;
+    channel
+        .send_eof()
+        .map_err(|e| format!("闁告瑦鍨块埀?EOF 濠㈡儼绮剧憴? {}", e))?;
     channel.wait_eof().ok();
     channel.wait_close().ok();
 
     let exit = channel.exit_status().unwrap_or(-1);
     if exit != 0 {
-        return Err(format!("闁告劖鐟ラ崣鍡樺緞鏉堫偉袝闁挎稑鐭傞埀顑藉亾闁告垼娅ｉ悥? {}", exit));
+        return Err(format!(
+            "闁告劖鐟ラ崣鍡樺緞鏉堫偉袝闁挎稑鐭傞埀顑藉亾闁告垼娅ｉ悥? {}",
+            exit
+        ));
     }
 
     Ok(())
@@ -467,34 +493,28 @@ pub fn ssh_write_file(
 
 /// 閺夆晜绮庨埢濂告煂瀹ュ懏鍎欑紓鍐╁灥閸?
 #[tauri::command]
-pub fn ssh_restart_gateway(
-    manager: State<SshManager>,
-) -> Result<String, String> {
+pub fn ssh_restart_gateway(manager: State<SshManager>) -> Result<String, String> {
     ssh_run_gateway_command(manager, "restart")
 }
 
 /// 閺夆晜绮庨埢濂稿触椤栨艾袟缂傚啯鍨甸崣?
 #[tauri::command]
-pub fn ssh_start_gateway(
-    manager: State<SshManager>,
-) -> Result<String, String> {
+pub fn ssh_start_gateway(manager: State<SshManager>) -> Result<String, String> {
     ssh_run_gateway_command(manager, "start")
 }
 
 /// 閺夆晜绮庨埢濂稿磻濠婂嫷鍓剧紓鍐╁灥閸?
 #[tauri::command]
-pub fn ssh_stop_gateway(
-    manager: State<SshManager>,
-) -> Result<String, String> {
+pub fn ssh_stop_gateway(manager: State<SshManager>) -> Result<String, String> {
     ssh_run_gateway_command(manager, "stop")
 }
 
 /// 閺夆晜绮庨埢濂稿箥瑜戦、鎴犵磾閹存繂褰犻柛娑欏灊閹躲倝鏁嶉崸鐨宎rt / stop / restart闁?
-fn ssh_run_gateway_command(
-    manager: State<SshManager>,
-    action: &str,
-) -> Result<String, String> {
-    let conn = manager.connection.lock().map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
+fn ssh_run_gateway_command(manager: State<SshManager>, action: &str) -> Result<String, String> {
+    let conn = manager
+        .connection
+        .lock()
+        .map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
     let conn = conn.as_ref().ok_or("SSH connection not found")?;
 
     if !conn.session.authenticated() {
@@ -544,10 +564,11 @@ rm -f "$tmp" 2>/dev/null || true
 
 /// 閺夆晜绮庨埢濂稿磻閵夈儲鍊ｆ俊顐熷亾闁哄被鍎荤槐?27.0.0.1:18789闁?
 #[tauri::command]
-pub fn ssh_health_check(
-    manager: State<SshManager>,
-) -> Result<bool, String> {
-    let conn = manager.connection.lock().map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
+pub fn ssh_health_check(manager: State<SshManager>) -> Result<bool, String> {
+    let conn = manager
+        .connection
+        .lock()
+        .map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
     let conn = conn.as_ref().ok_or("SSH connection not found")?;
 
     if !conn.session.authenticated() {
@@ -569,10 +590,11 @@ fi
 
 /// 闁煎浜滄慨鈺呭箹濠婂喚鍤㈤弶鈺傜矌閳诲ジ寮靛鍛潳闁革絻鍔嬬粭鍌炴儍?OpenClaw 闂佹澘绉堕悿鍡涘棘閸ワ附顐介柨娑樼墦閳ь剚淇虹换?test -f 闁告稒鍨濋幎銈夋晬?
 #[tauri::command]
-pub fn ssh_search_config(
-    manager: State<SshManager>,
-) -> Result<Vec<ConfigSearchResult>, String> {
-    let conn = manager.connection.lock().map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
+pub fn ssh_search_config(manager: State<SshManager>) -> Result<Vec<ConfigSearchResult>, String> {
+    let conn = manager
+        .connection
+        .lock()
+        .map_err(|e| format!("闂佸じ绶氶弫濠勬嫚? {}", e))?;
     let conn = conn.as_ref().ok_or("SSH connection not found")?;
 
     if !conn.session.authenticated() {
@@ -640,7 +662,11 @@ pub fn ssh_search_config(
 fn get_remote_home(session: &Session) -> Option<String> {
     let output = exec_remote_command(session, "echo $HOME").ok()?;
     let home = output.trim().to_string();
-    if home.is_empty() { None } else { Some(home) }
+    if home.is_empty() {
+        None
+    } else {
+        Some(home)
+    }
 }
 
 /// 闁圭瑳鍡╂斀閺夆晜绮庨埢濂稿川閹存帗濮㈡鐐村劶缁绘垿宕堕悙瀵割伕闁荤偛妫楅幃妤呮儍閸曨喚缈婚柛?
@@ -685,20 +711,28 @@ fn strip_ansi_escapes(input: &str) -> String {
                         while i < len && !(bytes[i] >= b'@' && bytes[i] <= b'~') {
                             i += 1;
                         }
-                        if i < len { i += 1; }
+                        if i < len {
+                            i += 1;
+                        }
                     }
                     b']' => {
                         // OSC: ESC ] ... (缂備礁鐗婇娑欑?BEL 闁?ESC \)
                         i += 2;
                         while i < len {
-                            if bytes[i] == 0x07 { i += 1; break; }
+                            if bytes[i] == 0x07 {
+                                i += 1;
+                                break;
+                            }
                             if bytes[i] == 0x1b && i + 1 < len && bytes[i + 1] == b'\\' {
-                                i += 2; break;
+                                i += 2;
+                                break;
                             }
                             i += 1;
                         }
                     }
-                    _ => { i += 2; }
+                    _ => {
+                        i += 2;
+                    }
                 }
             } else {
                 i += 1;
@@ -852,10 +886,7 @@ echo "===END==="
         "x86_64"
     }
     .to_string();
-    let shell = sys_lines
-        .get(2)
-        .unwrap_or(&"sh")
-        .to_string();
+    let shell = sys_lines.get(2).unwrap_or(&"sh").to_string();
 
     let system = crate::installer::SystemInfo { os, arch, shell };
 

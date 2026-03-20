@@ -4,7 +4,7 @@ export type GateNavPage = 'overview' | 'ai-config' | 'diagnostics' | 'channels' 
 
 export const resolveGateTopbarTitle = (gateState: GateState, targetMode: EnvMode | null) => {
   if (gateState === 'NEED_INSTALL' && targetMode === 'local') {
-    return '安装 OpenClaw · 自动检测环境并安装所有依赖'
+    return '准备 OpenClaw 运行环境 · 检查内置运行时并完成本地配置'
   }
   return '安装与接入'
 }

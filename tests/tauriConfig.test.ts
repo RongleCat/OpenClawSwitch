@@ -8,31 +8,46 @@ const readJson = (relativePath: string) =>
       beforeDevCommand: string
       beforeBuildCommand: string
     }
-    tauri: {
+    bundle?: {
+      resources?: string[]
+    }
+    tauri?: {
       bundle: {
         resources?: string[]
       }
+    }
+    app?: {
+      windows?: Array<{
+        width?: number
+        height?: number
+        minWidth?: number
+        minHeight?: number
+      }>
     }
   }
 
 const readText = (relativePath: string) => readFileSync(resolve(process.cwd(), relativePath), "utf8")
 
 describe("tauri build commands", () => {
-  it("keeps the base config cross-platform safe", () => {
+  it("keeps the base config aligned with bundled runtime resources", () => {
     const tauriConfig = readJson("src-tauri/tauri.conf.json")
+    const bundleResources = tauriConfig.bundle?.resources ?? tauriConfig.tauri?.bundle?.resources ?? []
 
     expect(tauriConfig.build.beforeDevCommand).not.toContain("npm run")
     expect(tauriConfig.build.beforeBuildCommand).not.toContain("npm run")
-    expect(tauriConfig.build.beforeBuildCommand).not.toContain("prepare-openclaw-vendor")
-    expect(tauriConfig.build.beforeBuildCommand).not.toContain("prepare-windows-tools-vendor")
-    expect(tauriConfig.tauri.bundle.resources ?? []).not.toContain("resources/windows/**")
+    expect(tauriConfig.build.beforeBuildCommand).toContain("bundle-openclaw")
+    expect(tauriConfig.build.beforeBuildCommand).toContain("bundle-node-runtime")
+    expect(bundleResources).toContain("resources/vendor/openclaw")
+    expect(bundleResources).toContain("resources/vendor/node")
+    expect(bundleResources).not.toContain("resources/windows/**")
   })
 
-  it("keeps Windows-only assets in a Windows override config", () => {
+  it("keeps the windows override limited to platform packaging tweaks", () => {
     const windowsConfig = readJson("src-tauri/tauri.windows.conf.json")
+    const bundleResources = windowsConfig.bundle?.resources ?? windowsConfig.tauri?.bundle?.resources ?? []
 
-    expect(windowsConfig.build.beforeBuildCommand).toContain("prepare-windows-tools-vendor")
-    expect(windowsConfig.tauri.bundle.resources).toContain("resources/windows/**")
+    expect(windowsConfig.build.beforeBuildCommand).not.toContain("prepare-windows-tools-vendor")
+    expect(bundleResources).not.toContain("resources/windows/**")
   })
 
   it("routes CI builds through the right platform-specific commands", () => {
@@ -40,5 +55,15 @@ describe("tauri build commands", () => {
 
     expect(workflow).toContain("npm run tauri:build:mac")
     expect(workflow).toContain("npm run tauri:build:windows")
+  })
+
+  it("sets the compact shell window size in tauri config", () => {
+    const tauriConfig = readJson("src-tauri/tauri.conf.json")
+    const window = tauriConfig.app?.windows?.[0]
+
+    expect(window?.width).toBe(1000)
+    expect(window?.height).toBe(600)
+    expect(window?.minWidth).toBe(960)
+    expect(window?.minHeight).toBe(580)
   })
 })

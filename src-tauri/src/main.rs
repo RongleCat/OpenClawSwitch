@@ -4,14 +4,17 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
-use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Duration;
 
+mod bundled_runtime;
+mod desktop_prefs;
+mod desktop_shell;
+mod gateway_supervisor;
+mod installer;
 mod ssh;
 mod ssh_profiles;
-mod installer;
+mod startup_trace;
 
 // ============================================================================
 // 类型定义说明
@@ -113,8 +116,7 @@ fn load_config_from_path(path: &PathBuf) -> Result<Value, String> {
         return Err(format!("配置文件不存在: {}", path.display()));
     }
 
-    let content =
-        fs::read_to_string(path).map_err(|e| format!("读取配置文件失败: {}", e))?;
+    let content = fs::read_to_string(path).map_err(|e| format!("读取配置文件失败: {}", e))?;
 
     let config: Value =
         serde_json::from_str(&content).map_err(|e| format!("解析配置文件失败: {}", e))?;
@@ -129,8 +131,8 @@ fn save_config_to_path(config: &Value, path: &PathBuf) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
     }
 
-    let json = serde_json::to_string_pretty(config)
-        .map_err(|e| format!("序列化配置失败: {}", e))?;
+    let json =
+        serde_json::to_string_pretty(config).map_err(|e| format!("序列化配置失败: {}", e))?;
 
     fs::write(path, json).map_err(|e| format!("写入配置文件失败: {}", e))?;
 
@@ -237,7 +239,10 @@ fn save_config_as(config: Value, new_path: String) -> Result<String, String> {
     Ok(new_path)
 }
 
-fn build_open_path_command_for_os(path: &std::path::Path, os: &str) -> Result<(String, Vec<String>), String> {
+fn build_open_path_command_for_os(
+    path: &std::path::Path,
+    os: &str,
+) -> Result<(String, Vec<String>), String> {
     let path_str = path.to_string_lossy().to_string();
     match os {
         "macos" => Ok((
@@ -252,9 +257,29 @@ fn build_open_path_command_for_os(path: &std::path::Path, os: &str) -> Result<(S
 
 #[tauri::command]
 fn open_path_in_default_app(path: String) -> Result<(), String> {
-    let file_path = PathBuf::from(&path);
+    let expanded_path = if path == "~" || path.starts_with("~/") {
+        let home_dir = dirs::home_dir().ok_or("无法获取用户主目录".to_string())?;
+        if path == "~" {
+            home_dir
+        } else {
+            home_dir.join(path.trim_start_matches("~/"))
+        }
+    } else {
+        PathBuf::from(&path)
+    };
+    let file_path = expanded_path;
     if !file_path.exists() {
-        return Err(format!("路径不存在或无法访问({}): {}", if cfg!(target_os = "windows") { "windows" } else if cfg!(target_os = "macos") { "macos" } else { "linux" }, path));
+        return Err(format!(
+            "路径不存在或无法访问({}): {}",
+            if cfg!(target_os = "windows") {
+                "windows"
+            } else if cfg!(target_os = "macos") {
+                "macos"
+            } else {
+                "linux"
+            },
+            path
+        ));
     }
 
     let (program, args) = build_open_path_command_for_os(
@@ -313,9 +338,16 @@ fn get_providers(config: Value) -> Result<Vec<ProviderInfo>, String> {
                             arr.iter()
                                 .filter_map(|m| {
                                     let id = m.get("id")?.as_str()?.to_string();
-                                    let name = m.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
-                                    let reasoning = m.get("reasoning").and_then(|v| v.as_bool()).unwrap_or(false);
-                                    let context_window = m.get("contextWindow").and_then(|v| v.as_u64());
+                                    let name = m
+                                        .get("name")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string());
+                                    let reasoning = m
+                                        .get("reasoning")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false);
+                                    let context_window =
+                                        m.get("contextWindow").and_then(|v| v.as_u64());
                                     Some(ModelInfo {
                                         id,
                                         name,
@@ -467,11 +499,7 @@ fn upsert_provider(
 
 /// 导入完整的提供商配置（含 models 数组）
 #[tauri::command]
-fn import_provider(
-    mut config: Value,
-    name: String,
-    provider_json: Value,
-) -> Result<Value, String> {
+fn import_provider(mut config: Value, name: String, provider_json: Value) -> Result<Value, String> {
     // 确保 models.providers 结构存在
     if config.get("models").is_none() {
         config["models"] = json!({});
@@ -523,7 +551,8 @@ fn delete_provider(mut config: Value, name: String) -> Result<Value, String> {
                         .and_then(|models| models.as_array())
                         .and_then(|models_list| {
                             if !models_list.is_empty() {
-                                models_list.first()
+                                models_list
+                                    .first()
                                     .and_then(|first_model| first_model.get("id"))
                                     .and_then(|id| id.as_str())
                                     .map(|id_str| (k.clone(), id_str.to_string()))
@@ -541,9 +570,9 @@ fn delete_provider(mut config: Value, name: String) -> Result<Value, String> {
     sorted_providers.sort_by(|a, b| a.0.cmp(&b.0));
 
     // 找到第一个可用模型
-    let first_available_model = sorted_providers.first().map(|(provider_name, model_id)| {
-        format!("{}/{}", provider_name, model_id)
-    });
+    let first_available_model = sorted_providers
+        .first()
+        .map(|(provider_name, model_id)| format!("{}/{}", provider_name, model_id));
 
     // 现在删除提供商
     if let Some(models) = config.get_mut("models") {
@@ -709,10 +738,7 @@ fn remove_model_from_provider(
 
 /// 从提供商 API 获取模型列表
 #[tauri::command]
-async fn fetch_provider_models(
-    base_url: String,
-    api_key: String,
-) -> Result<Vec<String>, String> {
+async fn fetch_provider_models(base_url: String, api_key: String) -> Result<Vec<String>, String> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -744,46 +770,69 @@ async fn fetch_provider_models(
 
 /// 重启 OpenClaw 网关
 #[tauri::command]
-fn restart_gateway() -> Result<String, String> {
-    // 使用 spawn 非阻塞方式执行，避免 GUI 卡死
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("cmd")
-            .args(["/c", "openclaw", "gateway", "restart"])
-            .spawn()
-            .map_err(|e| format!("执行命令失败: {}", e))?;
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Command::new("sh")
-            .args(["-c", "openclaw gateway restart"])
-            .spawn()
-            .map_err(|e| format!("执行命令失败: {}", e))?;
-    }
-
+fn restart_gateway(app: tauri::AppHandle) -> Result<String, String> {
+    gateway_supervisor::restart_gateway_process(&app)?;
+    let _ = desktop_shell::refresh_tray_menu(&app);
+    // \u{7F51}\u{5173}\u{91CD}\u{542F}\u{547D}\u{4EE4}\u{5DF2}\u{53D1}\u{9001}
     Ok("网关重启命令已发送".to_string())
 }
 
 /// 本地健康检查（127.0.0.1:18789）
 #[tauri::command]
 fn health_check_gateway() -> Result<bool, String> {
-    let mut addrs = "127.0.0.1:18789"
-        .to_socket_addrs()
-        .map_err(|e| format!("解析地址失败: {}", e))?;
-    let addr = addrs.next().ok_or("无法解析网关地址".to_string())?;
-    let timeout = Duration::from_secs(2);
-    Ok(TcpStream::connect_timeout(&addr, timeout).is_ok())
+    Ok(bundled_runtime::is_default_web_ui_reachable(
+        std::time::Duration::from_secs(2),
+    ))
+}
+
+#[tauri::command]
+fn get_runtime_health(app: tauri::AppHandle) -> bundled_runtime::RuntimeHealth {
+    bundled_runtime::get_runtime_health(&app)
+}
+
+#[tauri::command]
+fn get_gateway_status(
+    app: tauri::AppHandle,
+) -> Result<bundled_runtime::GatewayStatusSnapshot, String> {
+    gateway_supervisor::current_gateway_status(&app)
+}
+
+fn quote_shell_arg(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\\\""))
+}
+
+fn build_bundled_tui_command(app: &tauri::AppHandle) -> Result<String, String> {
+    let node_bin = bundled_runtime::resolve_bundled_node_bin(app)?;
+    let openclaw_entry = bundled_runtime::resolve_bundled_openclaw_entry(app)?;
+    let data_dir = bundled_runtime::ensure_openclaw_data_dir()?;
+    let config_path = bundled_runtime::ensure_default_config_file()?;
+    let home_dir = dirs::home_dir().ok_or("无法获取用户主目录".to_string())?;
+
+    Ok(format!(
+        "OPENCLAW_HOME={data} OPENCLAW_CONFIG_PATH={config} CLAWDBOT_CONFIG_PATH={config} HOME={home} {node} {entry} tui",
+        data = quote_shell_arg(&data_dir.to_string_lossy()),
+        config = quote_shell_arg(&config_path.to_string_lossy()),
+        home = quote_shell_arg(&home_dir.to_string_lossy()),
+        node = quote_shell_arg(&node_bin.to_string_lossy()),
+        entry = quote_shell_arg(&openclaw_entry.to_string_lossy()),
+    ))
 }
 
 /// 打开终端并进入 TUI 模式
 #[tauri::command]
-fn open_tui() -> Result<(), String> {
+fn open_tui(app: tauri::AppHandle) -> Result<(), String> {
+    let bundled_tui_command = build_bundled_tui_command(&app)?;
     #[cfg(target_os = "windows")]
     {
         // Windows: 使用 start 命令打开新的 cmd 窗口并执行 openclaw tui
+        let windows_command = bundled_tui_command
+            .replace("OPENCLAW_HOME=", "set OPENCLAW_HOME=")
+            .replace(" OPENCLAW_CONFIG_PATH=", " && set OPENCLAW_CONFIG_PATH=")
+            .replace(" CLAWDBOT_CONFIG_PATH=", " && set CLAWDBOT_CONFIG_PATH=")
+            .replace(" HOME=", " && set HOME=")
+            .replace(" \"", " && \"");
         Command::new("cmd")
-            .args(["/c", "start", "cmd", "/k", "openclaw tui"])
+            .args(["/c", "start", "cmd", "/k", &windows_command])
             .spawn()
             .map_err(|e| format!("打开终端失败: {}", e))?;
     }
@@ -793,11 +842,7 @@ fn open_tui() -> Result<(), String> {
         // macOS: 使用 osascript 打开 Terminal 并执行命令
         // 需要先加载 shell 配置以确保 openclaw 命令可用
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        let shell_name = shell
-            .rsplit('/')
-            .next()
-            .unwrap_or("zsh")
-            .to_string();
+        let shell_name = shell.rsplit('/').next().unwrap_or("zsh").to_string();
 
         // 根据不同 shell 加载相应的配置文件
         let config_file = match shell_name.as_str() {
@@ -811,8 +856,10 @@ fn open_tui() -> Result<(), String> {
             .args([
                 "-e",
                 &format!(
-                    "tell application \"Terminal\" to do script \"source {} && openclaw tui\"",
+                    "tell application \"Terminal\" to do script \"source {} && {}\"",
                     config_file
+                    ,
+                    bundled_tui_command.replace('"', "\\\"")
                 ),
                 "-e",
                 "tell application \"Terminal\" to activate",
@@ -825,19 +872,15 @@ fn open_tui() -> Result<(), String> {
     {
         // 尝试多种终端模拟器
         let terminals = [
-            ("gnome-terminal", vec!["--", "openclaw", "tui"]),
-            ("konsole", vec!["-e", "openclaw", "tui"]),
-            ("xfce4-terminal", vec!["-e", "openclaw tui"]),
-            ("xterm", vec!["-e", "openclaw", "tui"]),
+            ("gnome-terminal", vec!["--", "sh", "-lc", bundled_tui_command.as_str()]),
+            ("konsole", vec!["-e", "sh", "-lc", bundled_tui_command.as_str()]),
+            ("xfce4-terminal", vec!["-e", bundled_tui_command.as_str()]),
+            ("xterm", vec!["-e", "sh", "-lc", bundled_tui_command.as_str()]),
         ];
 
         let mut success = false;
         for (terminal, args) in terminals {
-            if Command::new(terminal)
-                .args(&args)
-                .spawn()
-                .is_ok()
-            {
+            if Command::new(terminal).args(&args).spawn().is_ok() {
                 success = true;
                 break;
             }
@@ -856,8 +899,36 @@ fn open_tui() -> Result<(), String> {
 // ============================================================================
 
 fn main() {
-    tauri::Builder::default()
+    startup_trace::append("main.enter", "building tauri app");
+    let app = tauri::Builder::default()
         .manage(ssh::SshManager::new())
+        .manage(desktop_shell::DesktopShellState::default())
+        .manage(gateway_supervisor::GatewaySupervisor::default())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None::<Vec<&'static str>>,
+        ))
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            desktop_shell::handle_second_instance(app);
+        }))
+        .setup(|app| {
+            startup_trace::append("setup.begin", "initializing desktop shell");
+            desktop_shell::initialize(&app.handle())?;
+            startup_trace::append("setup.after_initialize", "applying startup preferences");
+            desktop_shell::apply_startup_preferences(&app.handle())?;
+            startup_trace::append("setup.after_apply_startup_preferences", "setup complete");
+            Ok(())
+        })
+        .on_menu_event(|app, event| {
+            desktop_shell::handle_menu_event(app, &event);
+        })
+        .on_tray_icon_event(|app, event| {
+            desktop_shell::handle_tray_icon_event(app, &event);
+        })
+        .on_window_event(|window, event| {
+            desktop_shell::handle_window_event(window, event);
+        })
         .invoke_handler(tauri::generate_handler![
             // 文件操作
             get_default_config_path,
@@ -882,6 +953,8 @@ fn main() {
             // OpenClaw 工具
             restart_gateway,
             health_check_gateway,
+            get_runtime_health,
+            get_gateway_status,
             open_tui,
             // SSH 连接
             ssh::ssh_connect,
@@ -934,9 +1007,23 @@ fn main() {
             installer::approve_feishu_pairing,
             installer::open_web_ui,
             installer::run_doctor_fix,
+            desktop_prefs::get_desktop_preferences,
+            desktop_prefs::set_desktop_preferences,
+            desktop_prefs::get_launch_at_startup_enabled,
+            desktop_prefs::set_launch_at_startup_enabled,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        // tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested
+        match event {
+            tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. } => {
+                gateway_supervisor::shutdown_gateway_processes(app_handle);
+            }
+            _ => {}
+        }
+    });
 }
 
 #[cfg(test)]
@@ -946,21 +1033,24 @@ mod tests {
 
     #[test]
     fn build_open_path_command_uses_textedit_on_macos() {
-        let (program, args) = build_open_path_command_for_os(Path::new("/tmp/openclaw.json"), "macos").unwrap();
+        let (program, args) =
+            build_open_path_command_for_os(Path::new("/tmp/openclaw.json"), "macos").unwrap();
         assert_eq!(program, "open");
         assert_eq!(args, vec!["-a", "TextEdit", "/tmp/openclaw.json"]);
     }
 
     #[test]
     fn build_open_path_command_uses_notepad_on_windows() {
-        let (program, args) = build_open_path_command_for_os(Path::new(r"C:\temp\openclaw.json"), "windows").unwrap();
+        let (program, args) =
+            build_open_path_command_for_os(Path::new(r"C:\temp\openclaw.json"), "windows").unwrap();
         assert_eq!(program, "notepad.exe");
         assert_eq!(args, vec![r"C:\temp\openclaw.json"]);
     }
 
     #[test]
     fn build_open_path_command_uses_xdg_open_on_linux() {
-        let (program, args) = build_open_path_command_for_os(Path::new("/tmp/openclaw.json"), "linux").unwrap();
+        let (program, args) =
+            build_open_path_command_for_os(Path::new("/tmp/openclaw.json"), "linux").unwrap();
         assert_eq!(program, "xdg-open");
         assert_eq!(args, vec!["/tmp/openclaw.json"]);
     }

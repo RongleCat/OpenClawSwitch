@@ -9,7 +9,7 @@ import {
 
 describe('resolveGateTopbarTitle', () => {
   it('returns merged install title in local install step', () => {
-    expect(resolveGateTopbarTitle('NEED_INSTALL', 'local')).toBe('安装 OpenClaw · 自动检测环境并安装所有依赖')
+    expect(resolveGateTopbarTitle('NEED_INSTALL', 'local')).toBe('准备 OpenClaw 运行环境 · 检查内置运行时并完成本地配置')
   })
 
   it('returns default gate title for other states', () => {
