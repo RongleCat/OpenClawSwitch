@@ -7,6 +7,7 @@ import { ModelsPage } from "@/pages/ModelsPage";
 import { OverviewPage } from "@/pages/OverviewPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { SetupPage } from "@/pages/SetupPage";
+import { resolveSetupRedirect } from "@/domain/setupBootstrap";
 import { useSettingsBootstrap } from "@/stores/settingsStore";
 
 export default function App() {
@@ -38,8 +39,9 @@ export default function App() {
     );
   }
 
-  if (!setupComplete && location.pathname !== "/setup") {
-    return <Navigate to="/setup" replace />;
+  const redirect = resolveSetupRedirect(location.pathname, setupComplete);
+  if (redirect) {
+    return <Navigate to={redirect} replace />;
   }
 
   return (

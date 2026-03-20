@@ -34,6 +34,8 @@ describe("tauri build commands", () => {
     const bundleResources = tauriConfig.bundle?.resources ?? tauriConfig.tauri?.bundle?.resources ?? []
 
     expect(tauriConfig.build.beforeDevCommand).not.toContain("npm run")
+    expect(tauriConfig.build.beforeDevCommand).toContain("bundle-openclaw")
+    expect(tauriConfig.build.beforeDevCommand).toContain("bundle-node-runtime")
     expect(tauriConfig.build.beforeBuildCommand).not.toContain("npm run")
     expect(tauriConfig.build.beforeBuildCommand).toContain("bundle-openclaw")
     expect(tauriConfig.build.beforeBuildCommand).toContain("bundle-node-runtime")

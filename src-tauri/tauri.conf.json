@@ -4,7 +4,7 @@
   "version": "2.0.0",
   "identifier": "com.openclawswitch.app",
   "build": {
-    "beforeDevCommand": "node ./node_modules/vite/bin/vite.js",
+    "beforeDevCommand": "node ./scripts/bundle-openclaw.mjs && node ./scripts/bundle-node-runtime.mjs && node ./node_modules/vite/bin/vite.js",
     "beforeBuildCommand": "node ./scripts/bundle-openclaw.mjs && node ./scripts/bundle-node-runtime.mjs && node ./node_modules/vite/bin/vite.js build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"

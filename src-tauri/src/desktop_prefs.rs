@@ -84,10 +84,7 @@ pub(crate) fn get_launch_at_startup_enabled_inner(app: &AppHandle) -> Result<boo
         .autolaunch()
         .is_enabled()
         .map_err(|error| format!("读取开机自启状态失败: {}", error))?;
-    crate::startup_trace::append(
-        "desktop_prefs.autolaunch.end",
-        format!("enabled={enabled}"),
-    );
+    crate::startup_trace::append("desktop_prefs.autolaunch.end", format!("enabled={enabled}"));
 
     let mut prefs = read_prefs()?;
     if prefs.launch_at_startup != enabled {

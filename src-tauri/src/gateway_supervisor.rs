@@ -105,7 +105,10 @@ pub fn start_gateway_process(app: &AppHandle) -> Result<String, String> {
     }
 
     let args = gateway_launch_args();
-    crate::startup_trace::append("gateway_supervisor.start.spawning", format!("args={args:?}"));
+    crate::startup_trace::append(
+        "gateway_supervisor.start.spawning",
+        format!("args={args:?}"),
+    );
     let child = bundled_runtime::build_openclaw_command(app, &args)?
         .spawn()
         .map_err(|error| format!("Failed to start the gateway: {}", error))?;

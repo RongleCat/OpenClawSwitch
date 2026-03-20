@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { create } from "zustand";
 import { invokeSafe, tryInvoke } from "@/lib/desktop";
+import { resolveSetupCompletion } from "@/domain/setupBootstrap";
+import { getRuntimeHealth } from "@/lib/runtime";
 
 export interface DesktopPreferences {
   launchAtStartup: boolean;
@@ -21,9 +23,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   initialize: async () => {
     const prefs = await tryInvoke<DesktopPreferences>("get_desktop_preferences");
     const launchAtStartup = await invokeSafe<boolean>("get_launch_at_startup_enabled", undefined, prefs?.launchAtStartup ?? false);
+    const runtime = await getRuntimeHealth();
     set({
       launchAtStartup,
-      setupComplete: prefs?.setupComplete ?? false,
+      setupComplete: resolveSetupCompletion(prefs?.setupComplete ?? false, runtime.shouldSkipSetup),
       loading: false
     });
   },

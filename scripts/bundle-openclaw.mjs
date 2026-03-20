@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { cp, mkdtemp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdtemp, mkdir, readdir, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +21,11 @@ async function copyDirContents(sourceDir, outputDir) {
     if (entry.isDirectory()) {
       await mkdir(outputPath, { recursive: true });
       await copyDirContents(sourcePath, outputPath);
+      return;
+    }
+    const entryStat = await lstat(sourcePath);
+    if (entryStat.isSymbolicLink()) {
+      await symlink(await readlink(sourcePath), outputPath);
       return;
     }
     await cp(sourcePath, outputPath, { recursive: false });
